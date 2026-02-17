@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir:*)",
+      "Bash(where:*)",
+      "Bash(\"C:\\\\Program Files\\\\Epic Games\\\\UE_5.7\\\\Engine\\\\Build\\\\BatchFiles\\\\Build.bat\" MaestraUnrealClean Win64 Development -project=\"C:\\\\Users\\\\jorda\\\\Dev\\\\maestra-unreal-examples\\\\UE5Aurora\\\\MaestraUnrealClean.uproject\" -WaitMutex -FromMsBuild)",
+      "Bash(findstr:*)",
+      "Bash(\"C:\\\\Program Files\\\\Epic Games\\\\UE_5.7\\\\Engine\\\\Build\\\\BatchFiles\\\\Build.bat\" MaestraUnrealCleanEditor Win64 Development -project=\"C:\\\\Users\\\\jorda\\\\Dev\\\\maestra-unreal-examples\\\\UE5Aurora\\\\MaestraUnrealClean.uproject\" -WaitMutex -FromMsBuild)",
+      "Bash(\"C:\\\\Program Files\\\\Epic Games\\\\UE_5.7\\\\Engine\\\\Build\\\\BatchFiles\\\\Build.bat\" MaestraUnrealCleanEditor Win64 Development -project=\"C:\\\\Users\\\\jorda\\\\Dev\\\\maestra-unreal-examples\\\\UE5Aurora\\\\MaestraUnrealClean.uproject\" -WaitMutex -FromMsBuild -NoLiveCoding)"
+    ]
+  }
+}
