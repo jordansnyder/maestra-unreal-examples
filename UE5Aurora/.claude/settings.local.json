@@ -34,7 +34,17 @@
       "Bash(powershell.exe -Command \"Get-ChildItem -Path ''C:\\\\Users\\\\jorda'' -Filter ''node.exe'' -Recurse -Depth 4 -ErrorAction SilentlyContinue | Select-Object -First 3 -Property FullName\")",
       "Bash(grep -r \"collision\\\\|Collision\\\\|COLLISION\\\\|interact\\\\|Interact\" /c/Users/jorda/Dev/maestra-unreal-examples/UE5Aurora/Source/MaestraUnrealClean/*.h --include=\"*.h\")",
       "Bash(xargs grep:*)",
-      "Bash(\"C:/Program Files/Epic Games/UE_5.7/Engine/Build/BatchFiles/Build.bat\" MaestraUnrealClean Win64 Development -project=\"C:/Users/jorda/Dev/maestra-unreal-examples/UE5Aurora/MaestraUnrealClean.uproject\" -WaitMutex -FromMsBuild)"
+      "Bash(\"C:/Program Files/Epic Games/UE_5.7/Engine/Build/BatchFiles/Build.bat\" MaestraUnrealClean Win64 Development -project=\"C:/Users/jorda/Dev/maestra-unreal-examples/UE5Aurora/MaestraUnrealClean.uproject\" -WaitMutex -FromMsBuild)",
+      "Bash(find /c/Users/Jordan/Documents/GitHub -name README* -type f)",
+      "Bash(grep -E \"\\\\.\\(h|cpp\\)$\")",
+      "Bash(find /c/Users/Jordan/Documents/GitHub -type f -name *.py)",
+      "Bash(find /c/Users/Jordan/Documents/GitHub -type d -name *rtl*sdr*)",
+      "Bash(find /c/Users/Jordan/Documents/GitHub/maestra-core -type f -name *.py)",
+      "Bash(find /c/Users/Jordan/Documents/GitHub -type f \\\\\\(-name *.py -o -name *.js -o -name *.ts \\\\\\))",
+      "Bash(find /c/Users/Jordan/Documents/GitHub -type f -name *.py -exec grep -l \"freq_min\\\\|amplitudes\" {})",
+      "Bash(2)",
+      "Bash(find /c/Users/Jordan -type f -name *.py)",
+      "Bash(find /c/Users/Jordan/Documents/GitHub -name *.py -path *rtl*sdr* -o -name *.py -path *sdr*)"
     ]
   }
 }

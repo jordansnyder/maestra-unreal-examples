@@ -28,9 +28,16 @@ void UAuroraDataMixer::BeginPlay()
 		InitializeUDP();
 	}
 
-	if (bUseRFSpectrum)
+	if (bUseRFSpectrum || bUseUDP)
 	{
+		// Always initialize RF when UDP is on — SDRF binary packets may arrive
 		InitializeRF();
+		if (!bUseRFSpectrum && bUseUDP)
+		{
+			// Auto-enable RF spectrum when UDP is active so incoming SDR data is used
+			bUseRFSpectrum = true;
+			UE_LOG(LogTemp, Log, TEXT("AuroraDataMixer: Auto-enabled RF spectrum (UDP is active, SDR data expected)"));
+		}
 	}
 }
 
@@ -55,6 +62,15 @@ void UAuroraDataMixer::TickComponent(float DeltaTime, ELevelTick TickType,
 	if (bUseMaestra)
 	{
 		ReadMaestraData();
+
+		// Fall back to HTTP polling if WebSocket isn't connected
+		if (MaestraClient && !MaestraClient->IsWebSocketConnected() &&
+			!MaestraEntitySlug.IsEmpty() &&
+			(ElapsedTime - LastStatePollTime) >= StatePollInterval)
+		{
+			MaestraClient->GetEntityBySlug(MaestraEntitySlug);
+			LastStatePollTime = ElapsedTime;
+		}
 	}
 
 	if (bUseRFSpectrum)
@@ -91,6 +107,7 @@ void UAuroraDataMixer::InitializeUDP()
 		UDPReceiver->bAutoStart = true;
 		UDPReceiver->RegisterComponent();
 		UDPReceiver->OnJsonMessageReceived.AddDynamic(this, &UAuroraDataMixer::OnUDPJsonReceived);
+		UDPReceiver->OnDataPacketReceived.AddDynamic(this, &UAuroraDataMixer::OnUDPDataPacketReceived);
 		UE_LOG(LogTemp, Log, TEXT("AuroraDataMixer: UDP receiver started on port %d"), UDPPort);
 	}
 }
@@ -99,11 +116,12 @@ void UAuroraDataMixer::InitializeRF()
 {
 	if (bUseUDP)
 	{
-		// Use real RF data from UDP stream
+		// Use real RF data from UDP stream (supports JSON and SDRF binary formats)
 		UDPRFProvider = NewObject<UUDPRFDataProvider>(this);
+		// Configure with wide defaults — SDRF packets will override freq range per-packet
 		UDPRFProvider->Configure(88.0f, 108.0f, RFNumBins, 30.0f);
 		RFProvider = UDPRFProvider;
-		UE_LOG(LogTemp, Log, TEXT("AuroraDataMixer: UDP RF spectrum provider initialized with %d bins"), RFNumBins);
+		UE_LOG(LogTemp, Log, TEXT("AuroraDataMixer: UDP RF spectrum provider initialized with %d bins (JSON + SDRF binary)"), RFNumBins);
 	}
 	else
 	{
@@ -149,6 +167,16 @@ void UAuroraDataMixer::OnUDPJsonReceived(const FString& JsonString)
 		{
 			RawUDPValue = FMath::Clamp(static_cast<float>(JsonObj->GetNumberField(TEXT("intensity"))), 0.0f, 1.0f);
 		}
+
+	}
+}
+
+void UAuroraDataMixer::OnUDPDataPacketReceived(const FDataPacket& Packet)
+{
+	// Handle SDRF binary packets from the RTL-SDR Python script
+	if (UDPRFProvider && Packet.RawBytes.Num() >= 36 && UUDPRFDataProvider::IsSDRFPacket(Packet.RawBytes))
+	{
+		UDPRFProvider->IngestSDRFPacket(Packet.RawBytes);
 	}
 }
 
@@ -158,12 +186,57 @@ void UAuroraDataMixer::OnUDPJsonReceived(const FString& JsonString)
 
 void UAuroraDataMixer::ReadMaestraData()
 {
-	if (TrackedEntity)
+	if (!TrackedEntity)
 	{
-		RawMaestraValue = FMath::Clamp(
-			TrackedEntity->GetStateFloat(MaestraDataKey, 0.0f),
-			0.0f, 1.0f
-		);
+		// Log once per second to avoid spam
+		if (FMath::Fmod(ElapsedTime, 5.0f) < 0.02f)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("AuroraDataMixer: TrackedEntity is null — waiting for Maestra entity '%s'"), *MaestraEntitySlug);
+		}
+		return;
+	}
+
+	RawMaestraValue = FMath::Clamp(
+		TrackedEntity->GetStateFloat(MaestraDataKey, 0.0f),
+		0.0f, 1.0f
+	);
+
+	// Read potentiometer values from entity state
+	bool bFoundAnyPot = TrackedEntity->HasStateKey(TEXT("pot1")) ||
+		TrackedEntity->HasStateKey(TEXT("pot2")) ||
+		TrackedEntity->HasStateKey(TEXT("pot3")) ||
+		TrackedEntity->HasStateKey(TEXT("pot4"));
+
+	if (bFoundAnyPot)
+	{
+		float NewPot1 = FMath::Clamp(TrackedEntity->GetStateFloat(TEXT("pot1"), RawPot1), 0.0f, 1.0f);
+		float NewPot2 = FMath::Clamp(TrackedEntity->GetStateFloat(TEXT("pot2"), RawPot2), 0.0f, 1.0f);
+		float NewPot3 = FMath::Clamp(TrackedEntity->GetStateFloat(TEXT("pot3"), RawPot3), 0.0f, 1.0f);
+		float NewPot4 = FMath::Clamp(TrackedEntity->GetStateFloat(TEXT("pot4"), RawPot4), 0.0f, 1.0f);
+
+		// Log when values change
+		if (!bHasPotData || FMath::Abs(NewPot1 - RawPot1) > 0.001f ||
+			FMath::Abs(NewPot2 - RawPot2) > 0.001f ||
+			FMath::Abs(NewPot3 - RawPot3) > 0.001f ||
+			FMath::Abs(NewPot4 - RawPot4) > 0.001f)
+		{
+			UE_LOG(LogTemp, Log, TEXT("AuroraDataMixer: Pots from entity state — pot1=%.3f pot2=%.3f pot3=%.3f pot4=%.3f"),
+				NewPot1, NewPot2, NewPot3, NewPot4);
+		}
+
+		RawPot1 = NewPot1;
+		RawPot2 = NewPot2;
+		RawPot3 = NewPot3;
+		RawPot4 = NewPot4;
+		bHasPotData = true;
+	}
+	else if (!bHasPotData && FMath::Fmod(ElapsedTime, 5.0f) < 0.02f)
+	{
+		// Periodic diagnostic: show what keys ARE in the state
+		TArray<FString> Keys = TrackedEntity->GetStateKeys();
+		FString KeyList = FString::Join(Keys, TEXT(", "));
+		UE_LOG(LogTemp, Log, TEXT("AuroraDataMixer: No pot keys found in entity '%s'. Available keys: [%s]"),
+			*MaestraEntitySlug, *KeyList);
 	}
 }
 
@@ -323,27 +396,64 @@ FAuroraParameters UAuroraDataMixer::ComputeParameters(float DeltaTime)
 	SubstormEnergy = FMath::Max(0.0f, SubstormEnergy - SubstormDecayRate * DeltaTime);
 
 	float Smooth = GlobalSmoothingFactor;
+	float PotSmooth = PotSmoothingFactor; // Pots react fast — ~3 frame response at 0.3
+
+	// --- Smooth potentiometer values ---
+	Pot1_Hue = FMath::Lerp(Pot1_Hue, RawPot1, PotSmooth);
+	Pot2_Intensity = FMath::Lerp(Pot2_Intensity, RawPot2, PotSmooth);
+	Pot3_Height = FMath::Lerp(Pot3_Height, RawPot3, PotSmooth);
+	Pot4_Turbulence = FMath::Lerp(Pot4_Turbulence, RawPot4, PotSmooth);
 
 	// --- Intensity ---
-	SmoothedIntensity = FMath::Lerp(SmoothedIntensity, Aggregate, Smooth);
+	// Pot2 directly overrides intensity when pot data is present
+	float TargetIntensity = bHasPotData ? Pot2_Intensity : Aggregate;
+	// Blend RF/data aggregate contribution even when pots are active
+	if (bHasPotData)
+	{
+		// Pot controls the baseline, RF/data adds energy on top
+		TargetIntensity = FMath::Clamp(Pot2_Intensity * 0.7f + Aggregate * 0.3f, 0.0f, 1.0f);
+	}
+	SmoothedIntensity = FMath::Lerp(SmoothedIntensity, TargetIntensity, bHasPotData ? PotSmooth : Smooth);
 
 	// --- Audio pulse ---
-	SmoothedAudio = FMath::Lerp(SmoothedAudio, RawAudioAmplitude, Smooth * 3.0f); // Audio reacts faster
+	SmoothedAudio = FMath::Lerp(SmoothedAudio, RawAudioAmplitude, Smooth * 3.0f);
 
-	// --- Fold count (data activity → more complex folds) ---
-	// Use a combination of RF bin variance and aggregate change rate
-	float TargetFolds = FMath::Lerp(2.0f, 10.0f, FMath::Clamp(CurrentEntropy * 1.5f, 0.0f, 1.0f));
-	SmoothedFoldCount = FMath::Lerp(SmoothedFoldCount, TargetFolds, Smooth * 0.5f);
-
-	// --- Vertical extent (aggregate signal strength) ---
-	float TargetExtent = FMath::Clamp(Aggregate * 1.2f + SubstormEnergy * 0.3f, 0.1f, 1.0f);
-	SmoothedVerticalExtent = FMath::Lerp(SmoothedVerticalExtent, TargetExtent, Smooth);
-
-	// --- Wave speed (RF frequency encoding) ---
-	float TargetWaveSpeed = 1.0f;
-	if (bUseRFSpectrum && RawRFBins.Num() > 0)
+	// --- Fold count ---
+	float TargetFolds;
+	if (bHasPotData)
 	{
-		// Find dominant frequency bin → map to wave speed
+		// Pot4 turbulence drives fold complexity: 0→2 folds (calm), 1→12 folds (chaotic)
+		TargetFolds = FMath::Lerp(2.0f, 12.0f, Pot4_Turbulence);
+	}
+	else
+	{
+		TargetFolds = FMath::Lerp(2.0f, 10.0f, FMath::Clamp(CurrentEntropy * 1.5f, 0.0f, 1.0f));
+	}
+	SmoothedFoldCount = FMath::Lerp(SmoothedFoldCount, TargetFolds, bHasPotData ? PotSmooth : Smooth * 0.5f);
+
+	// --- Vertical extent ---
+	float TargetExtent;
+	if (bHasPotData)
+	{
+		// Pot3: 0→stubby (0.15), 1→towering (1.0)
+		TargetExtent = FMath::Lerp(0.15f, 1.0f, Pot3_Height);
+		TargetExtent = FMath::Clamp(TargetExtent + SubstormEnergy * 0.2f, 0.15f, 1.0f);
+	}
+	else
+	{
+		TargetExtent = FMath::Clamp(Aggregate * 1.2f + SubstormEnergy * 0.3f, 0.1f, 1.0f);
+	}
+	SmoothedVerticalExtent = FMath::Lerp(SmoothedVerticalExtent, TargetExtent, bHasPotData ? PotSmooth : Smooth);
+
+	// --- Wave speed ---
+	float TargetWaveSpeed = 1.0f;
+	if (bHasPotData)
+	{
+		// Pot4 also drives wave speed: 0→slow (0.2), 1→fast (4.0)
+		TargetWaveSpeed = FMath::Lerp(0.2f, 4.0f, Pot4_Turbulence);
+	}
+	else if (bUseRFSpectrum && RawRFBins.Num() > 0)
+	{
 		int32 PeakBin = 0;
 		float PeakVal = -999.0f;
 		for (int32 i = 0; i < RawRFBins.Num(); ++i)
@@ -357,9 +467,10 @@ FAuroraParameters UAuroraDataMixer::ComputeParameters(float DeltaTime)
 		float NormalizedFreq = static_cast<float>(PeakBin) / FMath::Max(1.0f, static_cast<float>(RawRFBins.Num() - 1));
 		TargetWaveSpeed = FMath::Lerp(0.3f, 3.0f, NormalizedFreq);
 	}
-	SmoothedWaveSpeed = FMath::Lerp(SmoothedWaveSpeed, TargetWaveSpeed, Smooth);
+	SmoothedWaveSpeed = FMath::Lerp(SmoothedWaveSpeed, TargetWaveSpeed, bHasPotData ? PotSmooth : Smooth);
 
 	// --- Per-bin RF spectrum smoothing ---
+	// Use faster smoothing so SDR data shows up immediately on the curtain
 	if (bUseRFSpectrum && RawRFBins.Num() > 0)
 	{
 		int32 NumBins = RawRFBins.Num();
@@ -368,7 +479,8 @@ FAuroraParameters UAuroraDataMixer::ComputeParameters(float DeltaTime)
 			SmoothedRFBins.SetNumZeroed(NumBins);
 		}
 
-		float RFSmooth = FMath::Min(Smooth * 2.0f, 1.0f);
+		// Fast RF smoothing: ~5 frame response for obvious visual feedback
+		float RFSmooth = FMath::Min(Smooth * 6.0f, 0.5f);
 		for (int32 i = 0; i < NumBins; ++i)
 		{
 			float Normalized = FMath::Clamp((RawRFBins[i] + 95.0f) / 85.0f, 0.0f, 1.0f);
@@ -381,36 +493,62 @@ FAuroraParameters UAuroraDataMixer::ComputeParameters(float DeltaTime)
 
 	Params.Intensity = SmoothedIntensity;
 
-	// Hue: Maestra potentiometer → spectral range (green→cyan→purple→red)
-	// Uses real aurora emission anchors
-	float HueInput = bUseMaestra ? RawMaestraValue : SmoothedIntensity;
+	// Hue: Pot1 directly controls hue when available, otherwise fall back to data
+	float HueInput;
+	if (bHasPotData)
+	{
+		HueInput = Pot1_Hue;
+	}
+	else if (bUseMaestra)
+	{
+		HueInput = RawMaestraValue;
+	}
+	else
+	{
+		HueInput = SmoothedIntensity;
+	}
 	// Map through aurora-realistic color stops:
-	// 0.0 → deep green (0.33), 0.5 → cyan-blue (0.55), 1.0 → crimson-red (0.0)
+	// 0.0 → deep green (0.33), 0.5 → cyan-blue (0.55), 1.0 → crimson-red (0.95)
 	if (HueInput < 0.5f)
 	{
 		Params.Hue = FMath::Lerp(0.33f, 0.55f, HueInput * 2.0f);
 	}
 	else
 	{
-		// Wrap through purple (0.75) down toward red (0.95 in normalized hue)
 		Params.Hue = FMath::Lerp(0.55f, 0.95f, (HueInput - 0.5f) * 2.0f);
 	}
 
-	// Saturation: desaturate if data sources are disconnected
+	// Saturation: keep high when pots are active for vivid color response
 	bool bHealthy = true;
 	if (bUseMaestra && !TrackedEntity)
 	{
 		bHealthy = false;
 	}
-	Params.Saturation = bHealthy ? FMath::Lerp(0.6f, 0.95f, SmoothedIntensity) : 0.3f;
+	if (bHasPotData)
+	{
+		// Vivid saturation that responds to hue position — more saturated in green/cyan
+		Params.Saturation = FMath::Lerp(0.7f, 0.98f, SmoothedIntensity);
+	}
+	else
+	{
+		Params.Saturation = bHealthy ? FMath::Lerp(0.6f, 0.95f, SmoothedIntensity) : 0.3f;
+	}
 
 	Params.FoldCount = SmoothedFoldCount;
 	Params.VerticalExtent = SmoothedVerticalExtent;
 	Params.WaveSpeed = SmoothedWaveSpeed;
 
-	// Noise complexity from entropy
-	Params.NoiseOctaves = FMath::Lerp(1.5f, 5.0f, CurrentEntropy);
-	Params.NoisePersistence = FMath::Lerp(0.3f, 0.65f, CurrentEntropy);
+	// Noise complexity: pot4 turbulence also drives noise when active
+	if (bHasPotData)
+	{
+		Params.NoiseOctaves = FMath::Lerp(1.5f, 5.5f, Pot4_Turbulence);
+		Params.NoisePersistence = FMath::Lerp(0.25f, 0.7f, Pot4_Turbulence);
+	}
+	else
+	{
+		Params.NoiseOctaves = FMath::Lerp(1.5f, 5.0f, CurrentEntropy);
+		Params.NoisePersistence = FMath::Lerp(0.3f, 0.65f, CurrentEntropy);
+	}
 
 	// Audio breathing pulse
 	Params.LuminancePulse = SmoothedAudio;

@@ -644,6 +644,19 @@ void AAuroraBorealisActor::DrawDebugHUD(const FAuroraParameters& Params) const
 		CurtainMID ? FColor::Green : FColor::Red,
 		FString::Printf(TEXT("Material: %s"), CurtainMID ? TEXT("OK") : TEXT("NONE!")));
 
+	// Potentiometer state
+	if (DataMixer && DataMixer->bHasPotData)
+	{
+		GEngine->AddOnScreenDebugMessage(Key++, 0.0f, FColor::Orange,
+			FString::Printf(TEXT("POT: Hue=%.2f Int=%.2f Hgt=%.2f Turb=%.2f"),
+				DataMixer->Pot1_Hue, DataMixer->Pot2_Intensity,
+				DataMixer->Pot3_Height, DataMixer->Pot4_Turbulence));
+	}
+	else
+	{
+		GEngine->AddOnScreenDebugMessage(Key++, 0.0f, FColor::Red, TEXT("POT: No data (send {\"pot1\":0.5,...} via UDP)"));
+	}
+
 	// RF Spectrum collision info
 	if (Params.RFSpectrumBins.Num() > 0)
 	{

@@ -143,10 +143,36 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aurora|Audio")
 	bool bUseAudio = false;
 
+	// === Potentiometers (4 knobs, 0-1, received via UDP JSON) ===
+
+	/** Pot 1: Color/Hue — sweeps through the full aurora color spectrum (green→cyan→purple→red). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Aurora|Potentiometers")
+	float Pot1_Hue = 0.35f;
+
+	/** Pot 2: Intensity — controls overall brightness from dim to blazing. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Aurora|Potentiometers")
+	float Pot2_Intensity = 0.5f;
+
+	/** Pot 3: Height — controls curtain vertical extent from stubby to towering. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Aurora|Potentiometers")
+	float Pot3_Height = 0.5f;
+
+	/** Pot 4: Turbulence — controls wave speed and fold complexity (calm to chaotic). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Aurora|Potentiometers")
+	float Pot4_Turbulence = 0.3f;
+
+	/** How fast potentiometer changes take effect (higher = faster, 0.3 = ~3 frame response). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aurora|Potentiometers", meta=(ClampMin="0.05", ClampMax="1.0"))
+	float PotSmoothingFactor = 0.3f;
+
+	/** Set to true when at least one potentiometer packet has been received. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Aurora|Potentiometers")
+	bool bHasPotData = false;
+
 	// === Smoothing ===
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aurora|Smoothing", meta=(ClampMin="0.005", ClampMax="1.0"))
-	float GlobalSmoothingFactor = 0.03f;
+	float GlobalSmoothingFactor = 0.12f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aurora|Smoothing", meta=(ClampMin="0.0", ClampMax="30.0"))
 	float SubstormDecayRate = 2.0f;
@@ -192,6 +218,12 @@ private:
 	TArray<float> RawRFBins;
 	TArray<float> SmoothedRFBins;
 
+	// --- Potentiometer raw targets ---
+	float RawPot1 = 0.35f;
+	float RawPot2 = 0.5f;
+	float RawPot3 = 0.5f;
+	float RawPot4 = 0.3f;
+
 	// --- Smoothed intermediates ---
 	float SmoothedIntensity = 0.2f;
 	float SmoothedAudio = 0.0f;
@@ -229,6 +261,10 @@ private:
 	// --- Elapsed time ---
 	float ElapsedTime = 0.0f;
 
+	// --- Periodic state polling ---
+	float LastStatePollTime = 0.0f;
+	float StatePollInterval = 0.5f; // Re-fetch entity state every 0.5s via HTTP
+
 	// --- Internal methods ---
 	void InitializeMaestra();
 	void InitializeUDP();
@@ -249,4 +285,7 @@ private:
 
 	UFUNCTION()
 	void OnUDPJsonReceived(const FString& JsonString);
+
+	UFUNCTION()
+	void OnUDPDataPacketReceived(const FDataPacket& Packet);
 };

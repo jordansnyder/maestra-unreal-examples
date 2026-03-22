@@ -23,6 +23,23 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "RF Data")
 	void IngestRawBytes(const TArray<uint8>& Bytes);
 
+	/** Feed an SDRF binary packet from the Python RTL-SDR script.
+	 *  Header (36 bytes, little-endian):
+	 *    [0:4]   uint32  magic       0x53445246 ("SDRF")
+	 *    [4:8]   uint32  sequence
+	 *    [8:16]  float64 center_freq Hz
+	 *    [16:24] float64 sample_rate Hz
+	 *    [24:32] float64 reserved
+	 *    [32:36] uint32  fft_size
+	 *    [36:]   float32[] power_db
+	 *  Returns true if the packet was valid SDRF format. */
+	UFUNCTION(BlueprintCallable, Category = "RF Data")
+	bool IngestSDRFPacket(const TArray<uint8>& Bytes);
+
+	/** Check if raw bytes begin with the SDRF magic number. */
+	UFUNCTION(BlueprintCallable, Category = "RF Data")
+	static bool IsSDRFPacket(const TArray<uint8>& Bytes);
+
 private:
 	FRFSpectrumFrame LatestFrame;
 	FCriticalSection FrameLock;
