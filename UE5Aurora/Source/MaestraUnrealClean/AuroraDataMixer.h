@@ -5,6 +5,7 @@
 #include "UDPReceiverComponent.h"
 #include "RFDataProvider.h"
 #include "SimulatedRFDataProvider.h"
+#include "UDPRFDataProvider.h"
 #include "MaestraClient.h"
 #include "MaestraEntity.h"
 #include "AuroraDataMixer.generated.h"
@@ -57,6 +58,11 @@ struct MAESTRAUNREALCLEAN_API FAuroraParameters
 	// Substorm flare intensity (0-1). Triggered by data spikes.
 	UPROPERTY(BlueprintReadOnly, Category = "Aurora")
 	float SubstormFlare = 0.0f;
+
+	// Per-bin normalized RF spectrum (0-1), mapped spatially along curtain width.
+	// Empty when RF is disabled. Length matches RFNumBins.
+	UPROPERTY(BlueprintReadOnly, Category = "Aurora")
+	TArray<float> RFSpectrumBins;
 };
 
 /**
@@ -184,6 +190,7 @@ private:
 	float RawAudioAmplitude = 0.0f;
 	TArray<float> RawAudioBands;
 	TArray<float> RawRFBins;
+	TArray<float> SmoothedRFBins;
 
 	// --- Smoothed intermediates ---
 	float SmoothedIntensity = 0.2f;
@@ -214,7 +221,10 @@ private:
 
 	// --- RF ---
 	UPROPERTY()
-	USimulatedRFDataProvider* RFProvider;
+	URFDataProvider* RFProvider;
+
+	UPROPERTY()
+	UUDPRFDataProvider* UDPRFProvider;
 
 	// --- Elapsed time ---
 	float ElapsedTime = 0.0f;

@@ -166,6 +166,18 @@ public:
 	float RayContrast = 0.7f;
 
 	// =======================================================================
+	// RF Spectrum Collision
+	// =======================================================================
+
+	/** How strongly RF spectrum data modulates curtain brightness spatially (0=off, 1=full). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aurora|RF Collision", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float RFCollisionStrength = 0.7f;
+
+	/** Minimum brightness floor so dim RF regions don't completely vanish. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aurora|RF Collision", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float RFMinBrightness = 0.1f;
+
+	// =======================================================================
 	// Rendering Parameters
 	// =======================================================================
 

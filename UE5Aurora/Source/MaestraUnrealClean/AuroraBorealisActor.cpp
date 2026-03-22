@@ -286,6 +286,22 @@ void AAuroraBorealisActor::UpdateCurtainMesh(const FAuroraParameters& Params)
 			float EdgeFade = FMath::Sin(U * PI);
 			EdgeFade = FMath::Pow(FMath::Max(EdgeFade, 0.0f), 0.6f);
 
+			// ---- RF SPECTRUM SPATIAL COLLISION ----
+			float RFValue = 0.0f;
+			float RFMultiplier = 1.0f;
+			if (Params.RFSpectrumBins.Num() > 0 && RFCollisionStrength > 0.0f)
+			{
+				float BinF = U * static_cast<float>(Params.RFSpectrumBins.Num() - 1);
+				int32 Bin0 = FMath::FloorToInt32(BinF);
+				int32 Bin1 = FMath::Min(Bin0 + 1, Params.RFSpectrumBins.Num() - 1);
+				float Frac = BinF - static_cast<float>(Bin0);
+				RFValue = FMath::Lerp(Params.RFSpectrumBins[Bin0], Params.RFSpectrumBins[Bin1], Frac);
+
+				// Blend between uniform (1.0) and RF-modulated brightness
+				float Modulated = FMath::Max(RFValue, RFMinBrightness);
+				RFMultiplier = FMath::Lerp(1.0f, Modulated, RFCollisionStrength);
+			}
+
 			// ---- VERTICAL RAY STRUCTURE (per-column) ----
 			float RayNoise = FMath::PerlinNoise3D(FVector(
 				U * RayFrequency + BandPhase * 3.0f,
@@ -349,6 +365,8 @@ void AAuroraBorealisActor::UpdateCurtainMesh(const FAuroraParameters& Params)
 
 				float Alpha = HeightProfile * RayBrightness * Shimmer * EdgeFade * LineIntensity;
 				Alpha += Params.SubstormFlare * 0.3f * V;
+				// Apply RF spectrum spatial modulation
+				Alpha *= RFMultiplier;
 				Alpha = FMath::Clamp(Alpha, 0.0f, 1.0f);
 
 				// ---- COLOR ----
@@ -360,6 +378,14 @@ void AAuroraBorealisActor::UpdateCurtainMesh(const FAuroraParameters& Params)
 				// Only a subtle tint from data-driven hue — keep natural aurora colors dominant
 				FLinearColor DataColor = AuroraHSVToColor(DataHue, Params.Saturation, 1.0f);
 				FLinearColor FinalColor = FMath::Lerp(AltColor, DataColor, 0.15f);
+
+				// RF peak color tint — shift bright RF spots toward cyan/white
+				if (RFValue > 0.6f && RFCollisionStrength > 0.0f)
+				{
+					float Boost = (RFValue - 0.6f) / 0.4f;
+					FLinearColor RFTint(0.3f, 0.95f, 1.0f, 1.0f);
+					FinalColor = FMath::Lerp(FinalColor, RFTint, Boost * 0.3f * RFCollisionStrength);
+				}
 
 				// Boost color saturation — prevent washed-out appearance
 				float Luma = FinalColor.R * 0.299f + FinalColor.G * 0.587f + FinalColor.B * 0.114f;
@@ -617,4 +643,45 @@ void AAuroraBorealisActor::DrawDebugHUD(const FAuroraParameters& Params) const
 	GEngine->AddOnScreenDebugMessage(Key++, 0.0f,
 		CurtainMID ? FColor::Green : FColor::Red,
 		FString::Printf(TEXT("Material: %s"), CurtainMID ? TEXT("OK") : TEXT("NONE!")));
+
+	// RF Spectrum collision info
+	if (Params.RFSpectrumBins.Num() > 0)
+	{
+		// Find peak bin
+		int32 PeakBin = 0;
+		float PeakVal = 0.0f;
+		float AvgVal = 0.0f;
+		for (int32 i = 0; i < Params.RFSpectrumBins.Num(); ++i)
+		{
+			AvgVal += Params.RFSpectrumBins[i];
+			if (Params.RFSpectrumBins[i] > PeakVal)
+			{
+				PeakVal = Params.RFSpectrumBins[i];
+				PeakBin = i;
+			}
+		}
+		AvgVal /= static_cast<float>(Params.RFSpectrumBins.Num());
+
+		GEngine->AddOnScreenDebugMessage(Key++, 0.0f, FColor::Magenta,
+			FString::Printf(TEXT("RF: %d bins, Peak:%d (%.2f), Avg:%.3f, Collision:%.1f"),
+				Params.RFSpectrumBins.Num(), PeakBin, PeakVal, AvgVal, RFCollisionStrength));
+
+		// Mini spectrum bar (sample 16 bins across the spectrum)
+		FString Bar = TEXT("RF: ");
+		constexpr int32 BarWidth = 32;
+		for (int32 i = 0; i < BarWidth; ++i)
+		{
+			int32 BinIdx = i * Params.RFSpectrumBins.Num() / BarWidth;
+			float Val = Params.RFSpectrumBins[FMath::Min(BinIdx, Params.RFSpectrumBins.Num() - 1)];
+			if (Val > 0.7f) Bar += TEXT("#");
+			else if (Val > 0.4f) Bar += TEXT("|");
+			else if (Val > 0.15f) Bar += TEXT(".");
+			else Bar += TEXT(" ");
+		}
+		GEngine->AddOnScreenDebugMessage(Key++, 0.0f, FColor::Magenta, Bar);
+	}
+	else
+	{
+		GEngine->AddOnScreenDebugMessage(Key++, 0.0f, FColor::Red, TEXT("RF: No spectrum data"));
+	}
 }

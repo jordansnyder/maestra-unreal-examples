@@ -97,9 +97,22 @@ void UAuroraDataMixer::InitializeUDP()
 
 void UAuroraDataMixer::InitializeRF()
 {
-	RFProvider = NewObject<USimulatedRFDataProvider>(this);
-	RFProvider->Configure(88.0f, 108.0f, RFNumBins, 30.0f);
-	UE_LOG(LogTemp, Log, TEXT("AuroraDataMixer: RF spectrum provider initialized with %d bins"), RFNumBins);
+	if (bUseUDP)
+	{
+		// Use real RF data from UDP stream
+		UDPRFProvider = NewObject<UUDPRFDataProvider>(this);
+		UDPRFProvider->Configure(88.0f, 108.0f, RFNumBins, 30.0f);
+		RFProvider = UDPRFProvider;
+		UE_LOG(LogTemp, Log, TEXT("AuroraDataMixer: UDP RF spectrum provider initialized with %d bins"), RFNumBins);
+	}
+	else
+	{
+		// Fall back to simulated FM radio
+		USimulatedRFDataProvider* SimProvider = NewObject<USimulatedRFDataProvider>(this);
+		SimProvider->Configure(88.0f, 108.0f, RFNumBins, 30.0f);
+		RFProvider = SimProvider;
+		UE_LOG(LogTemp, Log, TEXT("AuroraDataMixer: Simulated RF spectrum provider initialized with %d bins"), RFNumBins);
+	}
 }
 
 // ============================================================================
@@ -120,6 +133,13 @@ void UAuroraDataMixer::OnUDPJsonReceived(const FString& JsonString)
 	TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonString);
 	if (FJsonSerializer::Deserialize(Reader, JsonObj) && JsonObj.IsValid())
 	{
+		// Route RF spectrum packets to the UDP RF provider
+		if (JsonObj->HasField(TEXT("amplitudes")) && UDPRFProvider)
+		{
+			UDPRFProvider->IngestPacket(JsonString);
+			return;
+		}
+
 		// Accept a generic "value" field (0-1) or "intensity"
 		if (JsonObj->HasField(TEXT("value")))
 		{
@@ -339,6 +359,23 @@ FAuroraParameters UAuroraDataMixer::ComputeParameters(float DeltaTime)
 	}
 	SmoothedWaveSpeed = FMath::Lerp(SmoothedWaveSpeed, TargetWaveSpeed, Smooth);
 
+	// --- Per-bin RF spectrum smoothing ---
+	if (bUseRFSpectrum && RawRFBins.Num() > 0)
+	{
+		int32 NumBins = RawRFBins.Num();
+		if (SmoothedRFBins.Num() != NumBins)
+		{
+			SmoothedRFBins.SetNumZeroed(NumBins);
+		}
+
+		float RFSmooth = FMath::Min(Smooth * 2.0f, 1.0f);
+		for (int32 i = 0; i < NumBins; ++i)
+		{
+			float Normalized = FMath::Clamp((RawRFBins[i] + 95.0f) / 85.0f, 0.0f, 1.0f);
+			SmoothedRFBins[i] = FMath::Lerp(SmoothedRFBins[i], Normalized, RFSmooth);
+		}
+	}
+
 	// --- Build output ---
 	FAuroraParameters Params;
 
@@ -380,6 +417,12 @@ FAuroraParameters UAuroraDataMixer::ComputeParameters(float DeltaTime)
 
 	// Substorm flare
 	Params.SubstormFlare = SubstormEnergy;
+
+	// Per-bin RF spectrum for spatial curtain modulation
+	if (bUseRFSpectrum && SmoothedRFBins.Num() > 0)
+	{
+		Params.RFSpectrumBins = SmoothedRFBins;
+	}
 
 	return Params;
 }
