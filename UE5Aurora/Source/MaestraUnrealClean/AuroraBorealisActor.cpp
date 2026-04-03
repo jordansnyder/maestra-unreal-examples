@@ -204,6 +204,9 @@ void AAuroraBorealisActor::UpdateGenerativeArt(float DeltaTime)
 {
 	const FAuroraParameters& Params = DataMixer->GetCurrentParameters();
 
+	// Accumulate phase incrementally to avoid discontinuities when WaveSpeed changes
+	AccumulatedWavePhase += DeltaTime * Params.WaveSpeed * 0.5f;
+
 	ComputeAllCurtainGeometry(Params);
 	UpdateCurtainMesh(Params);
 	PushHighlightParameters(Params);
@@ -233,7 +236,11 @@ void AAuroraBorealisActor::UpdateGenerativeArt(float DeltaTime)
 
 void AAuroraBorealisActor::UpdateCurtainMesh(const FAuroraParameters& Params)
 {
-	float EffectiveIntensity = FMath::Max(Params.Intensity, EchoIntensity * 0.4f);
+	// Effective intensity: use echo memory, but enforce a minimum floor so the
+	// aurora is always visible — critical for installation mode where the piece
+	// must never go completely dark even without data input.
+	float EffectiveIntensity = FMath::Max(Params.Intensity, EchoIntensity * 0.65f);
+	EffectiveIntensity = FMath::Max(EffectiveIntensity, 0.15f); // absolute floor
 	float ISoft = EffectiveIntensity * EffectiveIntensity * (3.0f - 2.0f * EffectiveIntensity);
 
 	float Emissive = FMath::Lerp(BaseEmissive, MaxEmissive, ISoft);
@@ -329,7 +336,7 @@ void AAuroraBorealisActor::UpdateCurtainMesh(const FAuroraParameters& Params)
 				float DropDistance = V * DynamicHeight;
 
 				// Gentle cloth-like sway — low frequency, smooth curves
-				float SwayPhase = U * 3.0f + Time * Params.WaveSpeed * 0.3f + Line.PhaseOffset;
+				float SwayPhase = U * 3.0f + AccumulatedWavePhase * 0.6f + Line.PhaseOffset;
 				float Sway = FMath::Sin(SwayPhase + V * 1.5f) * V * V * 60.0f * Params.NoisePersistence;
 
 				// Broad organic drift — low-frequency noise for gentle undulation
@@ -375,9 +382,9 @@ void AAuroraBorealisActor::UpdateCurtainMesh(const FAuroraParameters& Params)
 				float AltFrac = 1.0f - V; // 0=bottom, 1=top
 				FLinearColor AltColor = EmissionColorFromAltitude(AltFrac);
 
-				// Only a subtle tint from data-driven hue — keep natural aurora colors dominant
+				// Blend data-driven hue with natural altitude colors
 				FLinearColor DataColor = AuroraHSVToColor(DataHue, Params.Saturation, 1.0f);
-				FLinearColor FinalColor = FMath::Lerp(AltColor, DataColor, 0.15f);
+				FLinearColor FinalColor = FMath::Lerp(AltColor, DataColor, 0.55f);
 
 				// RF peak color tint — shift bright RF spots toward cyan/white
 				if (RFValue > 0.6f && RFCollisionStrength > 0.0f)
@@ -445,7 +452,7 @@ FVector AAuroraBorealisActor::ComputeSpinePoint(const FAuroraFieldLine& Line, fl
 	float ArcZ = CurtainAltitude + CurtainArcHeight * (1.0f - ArcT * ArcT);
 
 	float FoldFreq = Params.FoldCount;
-	float Phase = Line.PhaseOffset + ElapsedTime * Params.WaveSpeed * 0.5f;
+	float Phase = Line.PhaseOffset + AccumulatedWavePhase;
 
 	float PrimaryFold = FMath::Sin(FoldFreq * T * PI * 2.0f + Phase);
 	float DetailFold = FMath::Sin(FoldFreq * 2.5f * T * PI * 2.0f + Phase * 1.7f + 3.14f) * 0.3f;
@@ -566,6 +573,8 @@ void AAuroraBorealisActor::UpdateEcho(const FAuroraParameters& Params, float Del
 		float DecayRate = (EchoDecayTime > 0.0f) ? (DeltaTime / EchoDecayTime) : 1.0f;
 		EchoIntensity = FMath::Lerp(EchoIntensity, Params.Intensity, FMath::Clamp(DecayRate, 0.0f, 1.0f));
 	}
+	// Never let echo drop below a soft glow — keeps the piece alive
+	EchoIntensity = FMath::Max(EchoIntensity, 0.12f);
 }
 
 // ============================================================================

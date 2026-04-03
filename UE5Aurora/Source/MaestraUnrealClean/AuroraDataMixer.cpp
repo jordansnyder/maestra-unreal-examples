@@ -39,6 +39,11 @@ void UAuroraDataMixer::BeginPlay()
 			UE_LOG(LogTemp, Log, TEXT("AuroraDataMixer: Auto-enabled RF spectrum (UDP is active, SDR data expected)"));
 		}
 	}
+
+	if (ExternalBindings.Num() > 0)
+	{
+		InitializeExternalBindings();
+	}
 }
 
 void UAuroraDataMixer::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -78,8 +83,38 @@ void UAuroraDataMixer::TickComponent(float DeltaTime, ELevelTick TickType,
 		ReadRFData(DeltaTime);
 	}
 
-	// Compute mixed parameters
+	// Read external artist signals
+	if (ExternalBindings.Num() > 0)
+	{
+		ReadExternalBindings(DeltaTime);
+
+		// HTTP polling fallback for external entities when WebSocket is down
+		if (MaestraClient && !MaestraClient->IsWebSocketConnected() &&
+			(ElapsedTime - LastStatePollTime) >= StatePollInterval)
+		{
+			TSet<FString> PolledSlugs;
+			for (const FExternalSignalBinding& Binding : ExternalBindings)
+			{
+				if (Binding.bEnabled && !Binding.EntitySlug.IsEmpty() &&
+					!PolledSlugs.Contains(Binding.EntitySlug))
+				{
+					MaestraClient->GetEntityBySlug(Binding.EntitySlug);
+					PolledSlugs.Add(Binding.EntitySlug);
+				}
+			}
+			if (!bUseMaestra)
+			{
+				LastStatePollTime = ElapsedTime;
+			}
+		}
+	}
+
+	// Compute mixed parameters, then layer external signals on top
 	CurrentParameters = ComputeParameters(DeltaTime);
+	if (ExternalBindings.Num() > 0)
+	{
+		ApplyExternalBindings(CurrentParameters);
+	}
 	OnParametersUpdated.Broadcast(CurrentParameters);
 }
 
@@ -139,9 +174,20 @@ void UAuroraDataMixer::InitializeRF()
 
 void UAuroraDataMixer::OnMaestraEntityReceived(const FString& Slug, UMaestraEntity* Entity)
 {
+	// Local pot entity
 	if (Slug == MaestraEntitySlug)
 	{
 		TrackedEntity = Entity;
+	}
+
+	// External binding entities — cache by slug for ReadExternalBindings
+	for (const FExternalSignalBinding& Binding : ExternalBindings)
+	{
+		if (Binding.bEnabled && Binding.EntitySlug == Slug)
+		{
+			ExternalEntityCache.Add(Slug, Entity);
+			break; // Only need to cache once per slug
+		}
 	}
 }
 
@@ -246,6 +292,167 @@ void UAuroraDataMixer::ReadRFData(float DeltaTime)
 	{
 		FRFSpectrumFrame Frame = RFProvider->GetNextFrame(DeltaTime);
 		RawRFBins = Frame.Amplitudes;
+	}
+}
+
+// ============================================================================
+// External Signal Bindings (other artists' Maestra entities)
+// ============================================================================
+
+void UAuroraDataMixer::InitializeExternalBindings()
+{
+	// Ensure MaestraClient exists — may not if bUseMaestra was false
+	if (!MaestraClient)
+	{
+		MaestraClient = NewObject<UMaestraClient>(this);
+		MaestraClient->OnEntityReceived.AddDynamic(this, &UAuroraDataMixer::OnMaestraEntityReceived);
+		MaestraClient->InitializeWithWebSocket(MaestraApiUrl, MaestraWebSocketUrl);
+	}
+
+	// Collect unique slugs and subscribe
+	TSet<FString> ExternalSlugs;
+	for (const FExternalSignalBinding& Binding : ExternalBindings)
+	{
+		if (Binding.bEnabled && !Binding.EntitySlug.IsEmpty())
+		{
+			ExternalSlugs.Add(Binding.EntitySlug);
+		}
+	}
+
+	for (const FString& Slug : ExternalSlugs)
+	{
+		MaestraClient->SubscribeToEntity(Slug);
+		MaestraClient->GetEntityBySlug(Slug); // Initial REST fetch
+		UE_LOG(LogTemp, Log, TEXT("AuroraDataMixer: Subscribed to external entity '%s'"), *Slug);
+	}
+
+	// Initialize smoothed values — use blend-mode-appropriate defaults
+	SmoothedBindingValues.SetNum(ExternalBindings.Num());
+	for (int32 i = 0; i < ExternalBindings.Num(); ++i)
+	{
+		// Multiply mode needs a neutral default of 1.0 (no scaling),
+		// Additive/Override needs 0.0 (no contribution)
+		SmoothedBindingValues[i] = (ExternalBindings[i].BlendMode == ESignalBlendMode::Multiply) ? 1.0f : 0.0f;
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("AuroraDataMixer: Initialized %d external signal bindings across %d entities"),
+		ExternalBindings.Num(), ExternalSlugs.Num());
+}
+
+void UAuroraDataMixer::ReadExternalBindings(float DeltaTime)
+{
+	// Keep parallel arrays in sync if bindings were modified at runtime
+	if (SmoothedBindingValues.Num() != ExternalBindings.Num())
+	{
+		SmoothedBindingValues.SetNum(ExternalBindings.Num());
+	}
+
+	for (int32 i = 0; i < ExternalBindings.Num(); ++i)
+	{
+		const FExternalSignalBinding& Binding = ExternalBindings[i];
+		if (!Binding.bEnabled || Binding.EntitySlug.IsEmpty())
+		{
+			continue;
+		}
+
+		UMaestraEntity** FoundEntity = ExternalEntityCache.Find(Binding.EntitySlug);
+		if (!FoundEntity || !(*FoundEntity))
+		{
+			continue; // Entity not yet received — graceful skip
+		}
+
+		UMaestraEntity* Entity = *FoundEntity;
+		if (!Entity->HasStateKey(Binding.StateKey))
+		{
+			continue; // Key doesn't exist yet — graceful skip
+		}
+
+		// Read raw value from the entity
+		float RawValue = Entity->GetStateFloat(Binding.StateKey, 0.0f);
+
+		// Remap from the artist's input range to normalized 0-1
+		float InputRange = Binding.InputMax - Binding.InputMin;
+		float Normalized = (FMath::Abs(InputRange) > KINDA_SMALL_NUMBER)
+			? FMath::Clamp((RawValue - Binding.InputMin) / InputRange, 0.0f, 1.0f)
+			: 0.0f;
+
+		// Remap from 0-1 to the desired output range
+		float Remapped = FMath::Lerp(Binding.OutputMin, Binding.OutputMax, Normalized);
+
+		// Apply blend weight
+		float Weighted = Remapped * Binding.Weight;
+
+		// Smooth toward target
+		SmoothedBindingValues[i] = FMath::Lerp(SmoothedBindingValues[i], Weighted, Binding.SmoothingFactor);
+	}
+}
+
+void UAuroraDataMixer::ApplyExternalBindings(FAuroraParameters& Params) const
+{
+	for (int32 i = 0; i < ExternalBindings.Num(); ++i)
+	{
+		const FExternalSignalBinding& Binding = ExternalBindings[i];
+		if (!Binding.bEnabled || i >= SmoothedBindingValues.Num())
+		{
+			continue;
+		}
+
+		float BindingValue = SmoothedBindingValues[i];
+		float& ParamField = GetParamField(Params, Binding.TargetParam);
+
+		float MinRange, MaxRange;
+		GetParamRange(Binding.TargetParam, MinRange, MaxRange);
+
+		switch (Binding.BlendMode)
+		{
+		case ESignalBlendMode::Override:
+			ParamField = FMath::Clamp(BindingValue, MinRange, MaxRange);
+			break;
+
+		case ESignalBlendMode::Additive:
+			ParamField = FMath::Clamp(ParamField + BindingValue, MinRange, MaxRange);
+			break;
+
+		case ESignalBlendMode::Multiply:
+			ParamField = FMath::Clamp(ParamField * BindingValue, MinRange, MaxRange);
+			break;
+		}
+	}
+}
+
+float& UAuroraDataMixer::GetParamField(FAuroraParameters& Params, EAuroraTargetParam Target)
+{
+	switch (Target)
+	{
+	case EAuroraTargetParam::Intensity:        return Params.Intensity;
+	case EAuroraTargetParam::Hue:              return Params.Hue;
+	case EAuroraTargetParam::Saturation:       return Params.Saturation;
+	case EAuroraTargetParam::FoldCount:        return Params.FoldCount;
+	case EAuroraTargetParam::VerticalExtent:   return Params.VerticalExtent;
+	case EAuroraTargetParam::WaveSpeed:        return Params.WaveSpeed;
+	case EAuroraTargetParam::NoiseOctaves:     return Params.NoiseOctaves;
+	case EAuroraTargetParam::NoisePersistence: return Params.NoisePersistence;
+	case EAuroraTargetParam::LuminancePulse:   return Params.LuminancePulse;
+	case EAuroraTargetParam::SubstormFlare:    return Params.SubstormFlare;
+	default:                                   return Params.Intensity;
+	}
+}
+
+void UAuroraDataMixer::GetParamRange(EAuroraTargetParam Target, float& OutMin, float& OutMax)
+{
+	switch (Target)
+	{
+	case EAuroraTargetParam::Intensity:        OutMin = 0.0f;  OutMax = 1.0f;  break;
+	case EAuroraTargetParam::Hue:              OutMin = 0.0f;  OutMax = 1.0f;  break;
+	case EAuroraTargetParam::Saturation:       OutMin = 0.0f;  OutMax = 1.0f;  break;
+	case EAuroraTargetParam::FoldCount:        OutMin = 1.0f;  OutMax = 12.0f; break;
+	case EAuroraTargetParam::VerticalExtent:   OutMin = 0.0f;  OutMax = 1.0f;  break;
+	case EAuroraTargetParam::WaveSpeed:        OutMin = 0.2f;  OutMax = 4.0f;  break;
+	case EAuroraTargetParam::NoiseOctaves:     OutMin = 1.0f;  OutMax = 6.0f;  break;
+	case EAuroraTargetParam::NoisePersistence: OutMin = 0.0f;  OutMax = 1.0f;  break;
+	case EAuroraTargetParam::LuminancePulse:   OutMin = 0.0f;  OutMax = 1.0f;  break;
+	case EAuroraTargetParam::SubstormFlare:    OutMin = 0.0f;  OutMax = 1.0f;  break;
+	default:                                   OutMin = 0.0f;  OutMax = 1.0f;  break;
 	}
 }
 
@@ -364,14 +571,19 @@ float UAuroraDataMixer::ComputeAggregateIntensity() const
 		WeightSum += SourceWeights.RFSpectrumWeight;
 	}
 
-	// If no sources are active, return a gentle simulated baseline
+	// If no sources are active, return a vivid self-running baseline
+	// that looks good indefinitely on an installation display
 	if (WeightSum <= 0.0f)
 	{
 		float T = ElapsedTime;
-		float Base = 0.2f;
-		float Tide = FMath::Max(0.0f, FMath::Sin(T * 0.012f)) * 0.15f;
-		float Drift = FMath::Sin(T * 0.005f + 1.7f) * 0.08f;
-		return FMath::Clamp(Base + Tide + Drift, 0.05f, 0.5f);
+		float Base = 0.45f;
+		// Slow breathing cycle (~80s period) with asymmetric rise/fall
+		float Breath = FMath::Pow(FMath::Max(0.0f, FMath::Sin(T * 0.078f)), 0.6f) * 0.25f;
+		// Longer tidal drift (~200s period) for slow intensity wandering
+		float Tide = FMath::Sin(T * 0.031f + 1.7f) * 0.12f;
+		// Occasional surges (pseudo-substorm, ~5 min period)
+		float Surge = FMath::Pow(FMath::Max(0.0f, FMath::Sin(T * 0.0105f)), 4.0f) * 0.15f;
+		return FMath::Clamp(Base + Breath + Tide + Surge, 0.25f, 0.85f);
 	}
 
 	return FMath::Clamp(Total / WeightSum, 0.0f, 1.0f);
@@ -429,7 +641,12 @@ FAuroraParameters UAuroraDataMixer::ComputeParameters(float DeltaTime)
 	{
 		TargetFolds = FMath::Lerp(2.0f, 10.0f, FMath::Clamp(CurrentEntropy * 1.5f, 0.0f, 1.0f));
 	}
-	SmoothedFoldCount = FMath::Lerp(SmoothedFoldCount, TargetFolds, bHasPotData ? PotSmooth : Smooth * 0.5f);
+	// Fold count must smooth VERY slowly to avoid spatial phase jumps in the
+	// curtain ripple. When fold frequency changes rapidly, the sine-based folds
+	// shift discontinuously causing a jerky/popping appearance. A slow lerp
+	// (~0.03) makes fold changes feel like a gradual morph rather than a snap.
+	float FoldSmooth = bHasPotData ? FMath::Min(PotSmooth * 0.1f, 0.035f) : Smooth * 0.25f;
+	SmoothedFoldCount = FMath::Lerp(SmoothedFoldCount, TargetFolds, FoldSmooth);
 
 	// --- Vertical extent ---
 	float TargetExtent;
@@ -467,7 +684,9 @@ FAuroraParameters UAuroraDataMixer::ComputeParameters(float DeltaTime)
 		float NormalizedFreq = static_cast<float>(PeakBin) / FMath::Max(1.0f, static_cast<float>(RawRFBins.Num() - 1));
 		TargetWaveSpeed = FMath::Lerp(0.3f, 3.0f, NormalizedFreq);
 	}
-	SmoothedWaveSpeed = FMath::Lerp(SmoothedWaveSpeed, TargetWaveSpeed, bHasPotData ? PotSmooth : Smooth);
+	// Wave speed also needs gentler smoothing to avoid abrupt motion changes
+	float WaveSmooth = bHasPotData ? FMath::Min(PotSmooth * 0.3f, 0.1f) : Smooth;
+	SmoothedWaveSpeed = FMath::Lerp(SmoothedWaveSpeed, TargetWaveSpeed, WaveSmooth);
 
 	// --- Per-bin RF spectrum smoothing ---
 	// Use faster smoothing so SDR data shows up immediately on the curtain
@@ -493,37 +712,43 @@ FAuroraParameters UAuroraDataMixer::ComputeParameters(float DeltaTime)
 
 	Params.Intensity = SmoothedIntensity;
 
-	// Hue: Pot1 directly controls hue when available, otherwise fall back to data
+	// Hue: Pot1 directly controls hue when available, otherwise fall back to data.
+	// When idle (no sources), slowly cycle through the full spectrum for visual interest.
 	float HueInput;
 	if (bHasPotData)
 	{
 		HueInput = Pot1_Hue;
 	}
-	else if (bUseMaestra)
+	else if (bUseMaestra && TrackedEntity)
 	{
 		HueInput = RawMaestraValue;
 	}
 	else
 	{
-		HueInput = SmoothedIntensity;
+		// Slow autonomous hue cycling — completes a full sweep in ~4 minutes
+		// with subtle oscillation layered on top for organic feel
+		float CycleT = FMath::Fmod(ElapsedTime * 0.004f, 1.0f);
+		float Wobble = FMath::Sin(ElapsedTime * 0.017f) * 0.08f;
+		HueInput = FMath::Fmod(CycleT + Wobble + 1.0f, 1.0f);
 	}
-	// Map through aurora-realistic color stops:
-	// 0.0 → deep green (0.33), 0.5 → cyan-blue (0.55), 1.0 → crimson-red (0.95)
-	if (HueInput < 0.5f)
+	// Map through wider aurora color stops for more dramatic knob response:
+	// 0.0 → vivid green (0.28), 0.33 → teal/cyan (0.50), 0.66 → blue-purple (0.72), 1.0 → crimson-magenta (0.97)
+	// The wider spread means even small knob turns produce visible color shifts.
+	if (HueInput < 0.33f)
 	{
-		Params.Hue = FMath::Lerp(0.33f, 0.55f, HueInput * 2.0f);
+		Params.Hue = FMath::Lerp(0.28f, 0.50f, HueInput / 0.33f);
+	}
+	else if (HueInput < 0.66f)
+	{
+		Params.Hue = FMath::Lerp(0.50f, 0.72f, (HueInput - 0.33f) / 0.33f);
 	}
 	else
 	{
-		Params.Hue = FMath::Lerp(0.55f, 0.95f, (HueInput - 0.5f) * 2.0f);
+		Params.Hue = FMath::Lerp(0.72f, 0.97f, (HueInput - 0.66f) / 0.34f);
 	}
 
-	// Saturation: keep high when pots are active for vivid color response
-	bool bHealthy = true;
-	if (bUseMaestra && !TrackedEntity)
-	{
-		bHealthy = false;
-	}
+	// Saturation: always keep vivid — even without a data connection the
+	// aurora should look rich and colorful on an installation display.
 	if (bHasPotData)
 	{
 		// Vivid saturation that responds to hue position — more saturated in green/cyan
@@ -531,7 +756,10 @@ FAuroraParameters UAuroraDataMixer::ComputeParameters(float DeltaTime)
 	}
 	else
 	{
-		Params.Saturation = bHealthy ? FMath::Lerp(0.6f, 0.95f, SmoothedIntensity) : 0.3f;
+		// Previously this dropped to 0.3 when Maestra was disconnected,
+		// causing a washed-out ghost aurora. Now we keep saturation high
+		// regardless of connection state so the piece always looks vivid.
+		Params.Saturation = FMath::Lerp(0.65f, 0.95f, SmoothedIntensity);
 	}
 
 	Params.FoldCount = SmoothedFoldCount;
@@ -539,16 +767,19 @@ FAuroraParameters UAuroraDataMixer::ComputeParameters(float DeltaTime)
 	Params.WaveSpeed = SmoothedWaveSpeed;
 
 	// Noise complexity: pot4 turbulence also drives noise when active
+	float TargetNoisePersistence;
 	if (bHasPotData)
 	{
 		Params.NoiseOctaves = FMath::Lerp(1.5f, 5.5f, Pot4_Turbulence);
-		Params.NoisePersistence = FMath::Lerp(0.25f, 0.7f, Pot4_Turbulence);
+		TargetNoisePersistence = FMath::Lerp(0.25f, 0.7f, Pot4_Turbulence);
 	}
 	else
 	{
 		Params.NoiseOctaves = FMath::Lerp(1.5f, 5.0f, CurrentEntropy);
-		Params.NoisePersistence = FMath::Lerp(0.3f, 0.65f, CurrentEntropy);
+		TargetNoisePersistence = FMath::Lerp(0.3f, 0.65f, CurrentEntropy);
 	}
+	SmoothedNoisePersistence = FMath::Lerp(SmoothedNoisePersistence, TargetNoisePersistence, bHasPotData ? PotSmooth : Smooth);
+	Params.NoisePersistence = SmoothedNoisePersistence;
 
 	// Audio breathing pulse
 	Params.LuminancePulse = SmoothedAudio;
