@@ -21,15 +21,22 @@
 		},
 		{
 			"Name": "RawInput",
-			"Enabled": true
+			"Enabled": true,
+			"TargetAllowList": [ "Editor" ]
 		},
 		{
 			"Name": "ModelingToolsEditorMode",
-			"Enabled": true
+			"Enabled": true,
+			"TargetAllowList": [ "Editor" ]
 		},
 		{
 			"Name": "PythonScriptPlugin",
-			"Enabled": true
+			"Enabled": true,
+			"TargetAllowList": [ "Editor" ]
 		}
+	],
+	"TargetPlatforms": [
+		"Mac",
+		"Windows"
 	]
 }

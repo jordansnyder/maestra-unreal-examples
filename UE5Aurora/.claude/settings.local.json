@@ -48,7 +48,21 @@
       "Bash(find /Users/jordansnyder/Dev/maestra-core/sdks/arduino -name *.h -o -name *.cpp)",
       "Bash(ls C:UsersjordaDevmaestra-unreal-examplesUE5AuroraSourceMaestraUnrealCleanAuroraCameraDrift*)",
       "Bash(find /Users/jordansnyder/Dev/maestra-unreal-examples/UE5Aurora -maxdepth 3 \\\\\\(-name *.Build.cs -o -name *.uplugin -o -name BuildConfiguration.xml -o -name Makefile -o -name *.cmake \\\\\\))",
-      "Bash(find /Users/jordansnyder/Dev/maestra-unreal-examples/UE5Aurora -name *Packaging* -o -name *Package* -o -name *Release*)"
+      "Bash(find /Users/jordansnyder/Dev/maestra-unreal-examples/UE5Aurora -name *Packaging* -o -name *Package* -o -name *Release*)",
+      "Bash(find C:BuildsMaestraAuroraMaestraUnrealCleanSaved -name *.log -o -name *.txt)",
+      "Read(//c/Users/jorda/AppData/Local/MaestraUnrealClean/Saved/Logs/**)",
+      "Read(//c/Users/jorda/AppData/Local/MaestraUnreal/Saved/**)",
+      "Bash(find C:UsersjordaAppDataLocalCrashReportClient -name *.log -newer C:BuildsMaestraAuroraMaestraUnrealClean.exe)",
+      "Bash(find C:UsersjordaAppDataLocalCrashReportClient -name *.runtime-xml -o -name *.log)",
+      "Bash(grep -n \"Editor\\\\|editoronly\\\\|WITH_EDITOR\\\\|GEditor\\\\|UEditorEngine\\\\|FEditorStyle\" C:UsersjordaDevmaestra-unreal-examplesUE5AuroraSourceMaestraUnrealClean/*.cpp C:UsersjordaDevmaestra-unreal-examplesUE5AuroraSourceMaestraUnrealClean/*.h)",
+      "Bash(find C:/Builds -maxdepth 3 -name *.exe)",
+      "Bash(find C:/Users/jorda/Dev/maestra-unreal-examples/UE5Aurora -maxdepth 3 -name *.exe)",
+      "Bash(python -c \":*)",
+      "Bash(ls -lt \"C:/Users/jorda/Dev/maestra-unreal-examples/UE5Aurora/Windows/MaestraUnrealClean/Binaries/Win64/\"*.exe)",
+      "Bash(icacls \"C:/Users/jorda/Dev/maestra-unreal-examples/UE5Aurora/Windows/MaestraUnrealClean/Content/Paks/MaestraUnrealClean-Windows.ucas\")",
+      "Bash(icacls \"C:/Users/jorda/Dev/maestra-unreal-examples/UE5Aurora/Windows/MaestraUnrealClean/Content/Paks/global.ucas\")",
+      "Bash(ls -lt \"C:/Users/jorda/AppData/Roaming/Unreal Engine/AutomationTool/Logs/C+Program+Files+Epic+Games+UE_5.7/\"Cook*.txt)",
+      "Bash(find 'C:/Users/jorda/AppData/Roaming/Unreal Engine/AutomationTool' -name Cook* -type f)"
     ]
   }
 }

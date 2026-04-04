@@ -73,3 +73,32 @@ Plugins/**/Intermediate/*
 
 # Cache files for the editor to use
 DerivedDataCache/*
+
+# Packaged build output
+Windows/
+LinuxArm64Server/
+Linux/
+Mac/
+Android/
+IOS/
+
+# Pak extraction temp directory
+PakExtract/
+
+# UE5 upgrade logs
+UpgradeLog*.htm
+
+# Script Compiler
+*.asm
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+*.swp
+*~
+
+# Claude Code
+.claude/
