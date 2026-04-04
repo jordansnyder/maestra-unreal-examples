@@ -10,6 +10,94 @@
 #include "MaestraEntity.h"
 #include "AuroraDataMixer.generated.h"
 
+// ============================================================================
+// Enums for external signal routing
+// ============================================================================
+
+/** Which FAuroraParameters field an external signal binding targets. */
+UENUM(BlueprintType)
+enum class EAuroraTargetParam : uint8
+{
+	Intensity        UMETA(DisplayName = "Intensity"),
+	Hue              UMETA(DisplayName = "Hue"),
+	Saturation       UMETA(DisplayName = "Saturation"),
+	FoldCount        UMETA(DisplayName = "Fold Count"),
+	VerticalExtent   UMETA(DisplayName = "Vertical Extent"),
+	WaveSpeed        UMETA(DisplayName = "Wave Speed"),
+	NoiseOctaves     UMETA(DisplayName = "Noise Octaves"),
+	NoisePersistence UMETA(DisplayName = "Noise Persistence"),
+	LuminancePulse   UMETA(DisplayName = "Luminance Pulse"),
+	SubstormFlare    UMETA(DisplayName = "Substorm Flare"),
+};
+
+/** How an external signal combines with the already-computed parameter value. */
+UENUM(BlueprintType)
+enum class ESignalBlendMode : uint8
+{
+	Override   UMETA(DisplayName = "Override",  ToolTip = "Replace the computed value entirely"),
+	Additive   UMETA(DisplayName = "Additive",  ToolTip = "Add to the computed value (clamped)"),
+	Multiply   UMETA(DisplayName = "Multiply",  ToolTip = "Multiply the computed value"),
+};
+
+// ============================================================================
+// External signal binding — one routing from (entity + key) → aurora parameter
+// ============================================================================
+
+/**
+ * Routes a single float value from a Maestra entity's state into one of the
+ * aurora visual parameters. Configure input/output ranges to remap from the
+ * publishing artist's value range to the aurora's expected range.
+ */
+USTRUCT(BlueprintType)
+struct MAESTRAUNREALCLEAN_API FExternalSignalBinding
+{
+	GENERATED_BODY()
+
+	/** Maestra entity slug to read from (e.g. "janes-light-sculpture"). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Signal")
+	FString EntitySlug;
+
+	/** State key to read from that entity (e.g. "brightness", "colorWheel"). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Signal")
+	FString StateKey;
+
+	/** Which aurora parameter this signal drives. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Signal")
+	EAuroraTargetParam TargetParam = EAuroraTargetParam::Intensity;
+
+	/** How to combine with the existing computed value. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Signal")
+	ESignalBlendMode BlendMode = ESignalBlendMode::Additive;
+
+	/** Input range minimum (the publishing artist's value range). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Signal|Range")
+	float InputMin = 0.0f;
+
+	/** Input range maximum. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Signal|Range")
+	float InputMax = 1.0f;
+
+	/** Output range minimum (after remapping, before blend). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Signal|Range")
+	float OutputMin = 0.0f;
+
+	/** Output range maximum. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Signal|Range")
+	float OutputMax = 1.0f;
+
+	/** Blend weight: 0 = no effect, 1 = full effect. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Signal", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float Weight = 1.0f;
+
+	/** Smoothing factor (higher = faster response, 0.15 ≈ ~7 frame lag at 60 FPS). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Signal", meta=(ClampMin="0.01", ClampMax="1.0"))
+	float SmoothingFactor = 0.15f;
+
+	/** Enable/disable this binding without removing it. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Signal")
+	bool bEnabled = true;
+};
+
 /**
  * Aggregated aurora parameters produced by the mixer each frame.
  * Each field maps to a specific visual dimension of the aurora.
@@ -169,6 +257,13 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Aurora|Potentiometers")
 	bool bHasPotData = false;
 
+	// === External Signal Routing (other artists' Maestra entities) ===
+
+	/** Routes signals from other artists' Maestra entities into aurora parameters.
+	 *  Each binding reads one key from one entity and blends it into a target param. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aurora|External Signals")
+	TArray<FExternalSignalBinding> ExternalBindings;
+
 	// === Smoothing ===
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aurora|Smoothing", meta=(ClampMin="0.005", ClampMax="1.0"))
@@ -230,6 +325,7 @@ private:
 	float SmoothedFoldCount = 3.0f;
 	float SmoothedVerticalExtent = 0.5f;
 	float SmoothedWaveSpeed = 1.0f;
+	float SmoothedNoisePersistence = 0.4f;
 	float SubstormEnergy = 0.0f;
 
 	// --- Entropy tracking ---
@@ -265,13 +361,22 @@ private:
 	float LastStatePollTime = 0.0f;
 	float StatePollInterval = 0.5f; // Re-fetch entity state every 0.5s via HTTP
 
+	// --- External signal binding state ---
+	UPROPERTY()
+	TMap<FString, UMaestraEntity*> ExternalEntityCache;
+
+	TArray<float> SmoothedBindingValues;
+
 	// --- Internal methods ---
 	void InitializeMaestra();
 	void InitializeUDP();
 	void InitializeRF();
+	void InitializeExternalBindings();
 
 	void ReadMaestraData();
 	void ReadRFData(float DeltaTime);
+	void ReadExternalBindings(float DeltaTime);
+	void ApplyExternalBindings(FAuroraParameters& Params) const;
 
 	float ComputeAggregateIntensity() const;
 	float ComputeEntropy() const;
@@ -279,6 +384,12 @@ private:
 	void DetectSubstorm(float NewAggregate);
 
 	FAuroraParameters ComputeParameters(float DeltaTime);
+
+	/** Get a mutable reference to the target field in FAuroraParameters by enum. */
+	static float& GetParamField(FAuroraParameters& Params, EAuroraTargetParam Target);
+
+	/** Get the valid output range for a target parameter. */
+	static void GetParamRange(EAuroraTargetParam Target, float& OutMin, float& OutMax);
 
 	UFUNCTION()
 	void OnMaestraEntityReceived(const FString& Slug, UMaestraEntity* Entity);

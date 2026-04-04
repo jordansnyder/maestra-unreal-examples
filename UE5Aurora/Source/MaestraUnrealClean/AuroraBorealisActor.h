@@ -252,6 +252,7 @@ private:
 
 	float LaggedIntensity = 0.0f;
 	float EchoIntensity = 0.0f;
+	float AccumulatedWavePhase = 0.0f;
 
 	UPROPERTY()
 	UMaterialInstanceDynamic* CurtainMID;
