@@ -62,7 +62,15 @@
       "Bash(icacls \"C:/Users/jorda/Dev/maestra-unreal-examples/UE5Aurora/Windows/MaestraUnrealClean/Content/Paks/MaestraUnrealClean-Windows.ucas\")",
       "Bash(icacls \"C:/Users/jorda/Dev/maestra-unreal-examples/UE5Aurora/Windows/MaestraUnrealClean/Content/Paks/global.ucas\")",
       "Bash(ls -lt \"C:/Users/jorda/AppData/Roaming/Unreal Engine/AutomationTool/Logs/C+Program+Files+Epic+Games+UE_5.7/\"Cook*.txt)",
-      "Bash(find 'C:/Users/jorda/AppData/Roaming/Unreal Engine/AutomationTool' -name Cook* -type f)"
+      "Bash(find 'C:/Users/jorda/AppData/Roaming/Unreal Engine/AutomationTool' -name Cook* -type f)",
+      "Bash(\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\Installer\\\\vswhere.exe\" -property installationVersion)",
+      "Bash(cmd /c \"dir /b \"\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\VC\\\\Tools\\\\MSVC\\\\\"\"\")",
+      "Bash(cmd /c \"for /d %%d in \\(\"\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\*\"\"\\) do @echo %%d\")",
+      "Read(//c/Program Files/Microsoft Visual Studio/2022//**)",
+      "Read(//c/Program Files \\(x86\\)/Microsoft Visual Studio/**)",
+      "Read(//c/Program Files/Microsoft Visual Studio//**)",
+      "Read(//d/Epic Games/UE_5.7/Engine/Config/UnrealBuildTool/**)",
+      "Read(//d/Epic Games/UE_5.7/Engine/Extras/UnrealBuildTool/**)"
     ]
   }
 }
