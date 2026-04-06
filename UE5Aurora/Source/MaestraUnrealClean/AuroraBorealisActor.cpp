@@ -236,12 +236,14 @@ void AAuroraBorealisActor::UpdateGenerativeArt(float DeltaTime)
 
 void AAuroraBorealisActor::UpdateCurtainMesh(const FAuroraParameters& Params)
 {
-	// Effective intensity: use echo memory, but enforce a minimum floor so the
-	// aurora is always visible — critical for installation mode where the piece
-	// must never go completely dark even without data input.
-	float EffectiveIntensity = FMath::Max(Params.Intensity, EchoIntensity * 0.65f);
-	EffectiveIntensity = FMath::Max(EffectiveIntensity, 0.15f); // absolute floor
-	float ISoft = EffectiveIntensity * EffectiveIntensity * (3.0f - 2.0f * EffectiveIntensity);
+	// Effective intensity: use echo memory as fallback, but let the pot drive
+	// the aurora down to a near-dark state for maximum dynamic range.
+	// Floor is low so the knob sweep from 0→1 is dramatic and obvious.
+	float EffectiveIntensity = FMath::Max(Params.Intensity, EchoIntensity * 0.35f);
+	EffectiveIntensity = FMath::Max(EffectiveIntensity, 0.04f); // near-dark floor
+	// Power curve (x^1.5) instead of smoothstep — more responsive in the low-mid
+	// range so small knob turns produce visible brightness changes.
+	float ISoft = FMath::Pow(EffectiveIntensity, 1.5f);
 
 	float Emissive = FMath::Lerp(BaseEmissive, MaxEmissive, ISoft);
 	Emissive += Params.LuminancePulse * 4.0f;

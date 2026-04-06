@@ -622,8 +622,8 @@ FAuroraParameters UAuroraDataMixer::ComputeParameters(float DeltaTime)
 	// Blend RF/data aggregate contribution even when pots are active
 	if (bHasPotData)
 	{
-		// Pot controls the baseline, RF/data adds energy on top
-		TargetIntensity = FMath::Clamp(Pot2_Intensity * 0.7f + Aggregate * 0.3f, 0.0f, 1.0f);
+		// Pot dominates intensity — RF/data adds a subtle shimmer on top
+		TargetIntensity = FMath::Clamp(Pot2_Intensity * 0.9f + Aggregate * 0.1f, 0.0f, 1.0f);
 	}
 	SmoothedIntensity = FMath::Lerp(SmoothedIntensity, TargetIntensity, bHasPotData ? PotSmooth : Smooth);
 
