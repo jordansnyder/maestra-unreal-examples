@@ -247,7 +247,8 @@ void AAuroraBorealisActor::UpdateCurtainMesh(const FAuroraParameters& Params)
 
 	float Emissive = FMath::Lerp(BaseEmissive, MaxEmissive, ISoft);
 	Emissive += Params.LuminancePulse * 4.0f;
-	Emissive += Params.SubstormFlare * 15.0f;
+	Emissive += Params.SubstormFlare * 15.0f;   // beats + motion ride this
+	Emissive += Params.BassPulse * BassEmissiveStrength;
 
 	// Push emissive strength to material
 	if (CurtainMID)
@@ -294,6 +295,18 @@ void AAuroraBorealisActor::UpdateCurtainMesh(const FAuroraParameters& Params)
 			// Horizontal edge fade
 			float EdgeFade = FMath::Sin(U * PI);
 			EdgeFade = FMath::Pow(FMath::Max(EdgeFade, 0.0f), 0.6f);
+
+			// ---- POSITION HOTSPOT (tracks phone X via Params.FocusX) ----
+			// A travelling Gaussian bump in brightness centred on FocusX. Strength
+			// scales with FocusEnergy (phone Y axis), so it's invisible at rest.
+			float HotspotGain = 1.0f;
+			if (HotspotStrength > 0.0f && Params.FocusEnergy > 0.0f)
+			{
+				float DU = U - Params.FocusX;
+				float Sig = FMath::Max(HotspotWidth, 0.02f);
+				float Bump = FMath::Exp(-0.5f * (DU * DU) / (Sig * Sig));
+				HotspotGain = 1.0f + Params.FocusEnergy * HotspotStrength * Bump;
+			}
 
 			// ---- RF SPECTRUM SPATIAL COLLISION ----
 			float RFValue = 0.0f;
@@ -371,11 +384,15 @@ void AAuroraBorealisActor::UpdateCurtainMesh(const FAuroraParameters& Params)
 				// Vertical shimmer wave traveling upward
 				float ShimmerPhase = V * 8.0f - Time * RayShimmerSpeed + U * 4.0f + BandPhase * 6.28f;
 				float Shimmer = FMath::Lerp(0.65f, 1.0f, (FMath::Sin(ShimmerPhase + ShimmerBase * 3.0f) + 1.0f) * 0.5f);
+				// Treble sparkle — high frequencies make the vertical rays glitter.
+				Shimmer *= (1.0f + Params.TreblePulse * TrebleShimmerStrength);
 
 				float Alpha = HeightProfile * RayBrightness * Shimmer * EdgeFade * LineIntensity;
 				Alpha += Params.SubstormFlare * 0.3f * V;
 				// Apply RF spectrum spatial modulation
 				Alpha *= RFMultiplier;
+				// Apply position hotspot (bright spot tracks the phone across the wall)
+				Alpha *= HotspotGain;
 				Alpha = FMath::Clamp(Alpha, 0.0f, 1.0f);
 
 				// ---- COLOR ----
@@ -666,6 +683,26 @@ void AAuroraBorealisActor::DrawDebugHUD(const FAuroraParameters& Params) const
 	else
 	{
 		GEngine->AddOnScreenDebugMessage(Key++, 0.0f, FColor::Red, TEXT("POT: No data (send {\"pot1\":0.5,...} via UDP)"));
+	}
+
+	// Live audio reactivity state
+	if (DataMixer && DataMixer->bUseAudio && DataMixer->bUseMicrophone)
+	{
+		GEngine->AddOnScreenDebugMessage(Key++, 0.0f,
+			(Params.BassPulse + Params.MidPulse + Params.TreblePulse) > 0.01f ? FColor::Cyan : FColor::Red,
+			FString::Printf(TEXT("AUDIO: Bass=%.2f Mid=%.2f Treble=%.2f Beat=%.2f"),
+				Params.BassPulse, Params.MidPulse, Params.TreblePulse, Params.BeatFlare));
+	}
+
+	// Position / motion state
+	if (DataMixer && DataMixer->bUsePosition)
+	{
+		GEngine->AddOnScreenDebugMessage(Key++, 0.0f,
+			DataMixer->bHasPositionData ? FColor::Cyan : FColor::Red,
+			DataMixer->bHasPositionData
+				? FString::Printf(TEXT("POS: FocusX=%.2f Energy=%.2f Motion=%.2f"),
+					Params.FocusX, Params.FocusEnergy, Params.MotionEnergy)
+				: FString(TEXT("POS: No data (waiting for Maestra entity x/y/z)")));
 	}
 
 	// RF Spectrum collision info

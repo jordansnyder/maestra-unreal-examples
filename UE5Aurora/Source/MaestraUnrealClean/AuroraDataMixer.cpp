@@ -2,6 +2,10 @@
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "Dom/JsonObject.h"
+#include "AudioCaptureComponent.h"
+#include "AudioMixerBlueprintLibrary.h"
+#include "Sound/SoundSubmix.h"
+#include "Sound/SoundSubmixSend.h"
 
 UAuroraDataMixer::UAuroraDataMixer()
 {
@@ -44,6 +48,16 @@ void UAuroraDataMixer::BeginPlay()
 	{
 		InitializeExternalBindings();
 	}
+
+	if (bUseAudio && bUseMicrophone)
+	{
+		InitializeAudioAnalysis();
+	}
+
+	if (bUsePosition)
+	{
+		InitializePosition();
+	}
 }
 
 void UAuroraDataMixer::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -51,6 +65,16 @@ void UAuroraDataMixer::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	if (MaestraClient)
 	{
 		MaestraClient->DisconnectWebSocket();
+	}
+
+	if (bAudioAnalysisActive)
+	{
+		UAudioMixerBlueprintLibrary::StopAnalyzingOutput(this, AnalysisSubmix);
+		bAudioAnalysisActive = false;
+	}
+	if (AudioCapture)
+	{
+		AudioCapture->Stop();
 	}
 
 	Super::EndPlay(EndPlayReason);
@@ -81,6 +105,16 @@ void UAuroraDataMixer::TickComponent(float DeltaTime, ELevelTick TickType,
 	if (bUseRFSpectrum)
 	{
 		ReadRFData(DeltaTime);
+	}
+
+	if (bAudioAnalysisActive)
+	{
+		ReadAudioAnalysis(DeltaTime);
+	}
+
+	if (bUsePosition)
+	{
+		ReadPositionData(DeltaTime);
 	}
 
 	// Read external artist signals
@@ -178,6 +212,16 @@ void UAuroraDataMixer::OnMaestraEntityReceived(const FString& Slug, UMaestraEnti
 	if (Slug == MaestraEntitySlug)
 	{
 		TrackedEntity = Entity;
+	}
+
+	// Position entity (may be the same slug as the pot entity, or its own)
+	if (bUsePosition)
+	{
+		const FString EffectivePosSlug = PositionEntitySlug.IsEmpty() ? MaestraEntitySlug : PositionEntitySlug;
+		if (Slug == EffectivePosSlug)
+		{
+			PositionEntity = Entity;
+		}
 	}
 
 	// External binding entities — cache by slug for ReadExternalBindings
@@ -293,6 +337,217 @@ void UAuroraDataMixer::ReadRFData(float DeltaTime)
 		FRFSpectrumFrame Frame = RFProvider->GetNextFrame(DeltaTime);
 		RawRFBins = Frame.Amplitudes;
 	}
+}
+
+// ============================================================================
+// Position (Maestra entity x/y/z — e.g. a GyrOSC phone via the OSC mapper)
+// ============================================================================
+
+void UAuroraDataMixer::InitializePosition()
+{
+	// Make sure we have a Maestra client and are subscribed to the position entity.
+	const FString EffectivePosSlug = PositionEntitySlug.IsEmpty() ? MaestraEntitySlug : PositionEntitySlug;
+	if (EffectivePosSlug.IsEmpty())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("AuroraDataMixer: bUsePosition is on but no PositionEntitySlug (and no MaestraEntitySlug) set."));
+		return;
+	}
+
+	if (!MaestraClient)
+	{
+		MaestraClient = NewObject<UMaestraClient>(this);
+		MaestraClient->OnEntityReceived.AddDynamic(this, &UAuroraDataMixer::OnMaestraEntityReceived);
+		MaestraClient->InitializeWithWebSocket(MaestraApiUrl, MaestraWebSocketUrl);
+	}
+
+	MaestraClient->SubscribeToEntity(EffectivePosSlug);
+	MaestraClient->GetEntityBySlug(EffectivePosSlug);
+
+	UE_LOG(LogTemp, Log, TEXT("AuroraDataMixer: Position tracking enabled on entity '%s' (keys %s/%s/%s)"),
+		*EffectivePosSlug, *PosXKey, *PosYKey, *PosZKey);
+}
+
+void UAuroraDataMixer::ReadPositionData(float DeltaTime)
+{
+	if (!PositionEntity)
+	{
+		return; // Entity not yet received — graceful skip, keeps last known focus
+	}
+
+	const bool bHasX = PositionEntity->HasStateKey(PosXKey);
+	const bool bHasY = PositionEntity->HasStateKey(PosYKey);
+	const bool bHasZ = PositionEntity->HasStateKey(PosZKey);
+	if (!bHasX && !bHasY && !bHasZ)
+	{
+		return; // No position keys present yet
+	}
+
+	const float RawX = PositionEntity->GetStateFloat(PosXKey, PrevPosX);
+	const float RawY = PositionEntity->GetStateFloat(PosYKey, PrevPosY);
+	const float RawZ = PositionEntity->GetStateFloat(PosZKey, PrevPosZ);
+
+	// Normalize each axis from the sender's range to 0-1.
+	const float Range = PosInputMax - PosInputMin;
+	auto Norm = [this, Range](float V) -> float
+	{
+		return (FMath::Abs(Range) > KINDA_SMALL_NUMBER)
+			? FMath::Clamp((V - PosInputMin) / Range, 0.0f, 1.0f)
+			: 0.5f;
+	};
+	const float NX = Norm(RawX);
+	const float NY = Norm(RawY);
+
+	// Motion energy: magnitude of raw change across all three axes per second.
+	float Motion = 0.0f;
+	if (bHasPrevPos && DeltaTime > KINDA_SMALL_NUMBER)
+	{
+		const float DX = RawX - PrevPosX;
+		const float DY = RawY - PrevPosY;
+		const float DZ = RawZ - PrevPosZ;
+		const float Speed = FMath::Sqrt(DX * DX + DY * DY + DZ * DZ) / DeltaTime;
+		Motion = FMath::Clamp(Speed * MotionSensitivity / FMath::Max(Range, KINDA_SMALL_NUMBER), 0.0f, 1.0f);
+	}
+	PrevPosX = RawX; PrevPosY = RawY; PrevPosZ = RawZ;
+	bHasPrevPos = true;
+
+	// Smooth toward targets.
+	SmoothedFocusX     = FMath::Lerp(SmoothedFocusX, NX, PositionSmoothing);
+	SmoothedFocusEnergy = FMath::Lerp(SmoothedFocusEnergy, NY, PositionSmoothing);
+	// Motion rises instantly but decays smoothly so a flick leaves a trail.
+	SmoothedMotion = FMath::Max(FMath::Lerp(SmoothedMotion, 0.0f, FMath::Clamp(DeltaTime * 2.5f, 0.0f, 1.0f)), Motion);
+
+	bHasPositionData = true;
+}
+
+// ============================================================================
+// Audio analysis (live microphone / line-in spectral analysis)
+// ============================================================================
+
+void UAuroraDataMixer::InitializeAudioAnalysis()
+{
+	AActor* Owner = GetOwner();
+	if (!Owner)
+	{
+		return;
+	}
+
+	// Prefer a user-assigned Submix asset (most reliable, and its Output Volume
+	// can be set to 0 to guarantee the mic is never monitored). Fall back to a
+	// runtime-created submix if none is assigned.
+	if (AudioAnalysisSubmix)
+	{
+		AnalysisSubmix = AudioAnalysisSubmix;
+	}
+	else
+	{
+		AnalysisSubmix = NewObject<USoundSubmix>(this, TEXT("AuroraAnalysisSubmix"));
+		UE_LOG(LogTemp, Warning, TEXT("AuroraDataMixer: No AudioAnalysisSubmix asset assigned — created one at runtime. If audio analysis reads zero, assign a SoundSubmix asset in the editor instead."));
+	}
+
+	// Capture the default audio input device.
+	AudioCapture = NewObject<UAudioCaptureComponent>(Owner);
+	if (!AudioCapture)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("AuroraDataMixer: Failed to create AudioCaptureComponent."));
+		return;
+	}
+	// Route ONLY to the analysis submix — do NOT send to the master submix, so the
+	// captured audio is never played back through any speakers (no feedback). The
+	// send is baked into SoundSubmixSends before Start() so it's active immediately.
+	AudioCapture->bEnableBaseSubmix = false;
+	AudioCapture->bEnableSubmixSends = true;
+
+	FSoundSubmixSendInfo SendInfo;
+	SendInfo.SendLevel = 1.0f;
+	SendInfo.SoundSubmix = AnalysisSubmix;
+	AudioCapture->SoundSubmixSends.Add(SendInfo);
+
+	AudioCapture->RegisterComponent();
+	AudioCapture->Start();
+
+	// Build the set of log-spaced frequencies we'll query each frame.
+	AnalysisFrequencies.Reset();
+	const int32 NumBands = FMath::Clamp(AudioNumBands, 8, 64);
+	const float MinF = FMath::Max(20.0f, AudioMinFrequency);
+	const float MaxF = FMath::Max(MinF + 1.0f, AudioMaxFrequency);
+	const float LogMin = FMath::Loge(MinF);
+	const float LogMax = FMath::Loge(MaxF);
+	for (int32 i = 0; i < NumBands; ++i)
+	{
+		const float T = static_cast<float>(i) / static_cast<float>(NumBands - 1);
+		AnalysisFrequencies.Add(FMath::Exp(FMath::Lerp(LogMin, LogMax, T)));
+	}
+
+	// Use the library's analysis defaults (DefaultSize FFT, Hann window,
+	// linear interpolation, magnitude spectrum).
+	UAudioMixerBlueprintLibrary::StartAnalyzingOutput(this, AnalysisSubmix);
+
+	bAudioAnalysisActive = true;
+	RawAudioBands.SetNumZeroed(NumBands);
+
+	UE_LOG(LogTemp, Log, TEXT("AuroraDataMixer: Live audio analysis started — %d bands, %.0f-%.0f Hz (capture routed to private submix, no output)"),
+		NumBands, MinF, MaxF);
+}
+
+void UAuroraDataMixer::ReadAudioAnalysis(float DeltaTime)
+{
+	if (AnalysisFrequencies.Num() == 0)
+	{
+		return;
+	}
+
+	TArray<float> Magnitudes;
+	UAudioMixerBlueprintLibrary::GetMagnitudeForFrequencies(this, AnalysisFrequencies, Magnitudes, AnalysisSubmix);
+	if (Magnitudes.Num() != AnalysisFrequencies.Num())
+	{
+		return; // Analyzer not warmed up yet
+	}
+
+	const int32 NumBands = Magnitudes.Num();
+	if (RawAudioBands.Num() != NumBands)
+	{
+		RawAudioBands.SetNumZeroed(NumBands);
+	}
+
+	// Normalize magnitudes: gain + soft compression so the response is lively
+	// but doesn't pin to full white on loud passages.
+	float Overall = 0.0f;
+	for (int32 i = 0; i < NumBands; ++i)
+	{
+		const float Boosted = Magnitudes[i] * AudioInputGain;
+		const float Norm = Boosted / (1.0f + Boosted); // saturating 0-1
+		RawAudioBands[i] = Norm;
+		Overall += Norm;
+	}
+	Overall /= static_cast<float>(NumBands);
+
+	// Split into bass / mid / treble thirds (bands are log-spaced by frequency).
+	auto BandAvg = [this, NumBands](int32 Start, int32 End) -> float
+	{
+		Start = FMath::Clamp(Start, 0, NumBands - 1);
+		End = FMath::Clamp(End, Start + 1, NumBands);
+		float Sum = 0.0f;
+		for (int32 i = Start; i < End; ++i) { Sum += RawAudioBands[i]; }
+		return Sum / static_cast<float>(End - Start);
+	};
+	const int32 Third = FMath::Max(1, NumBands / 3);
+	const float Bass = BandAvg(0, Third);
+	const float Mid = BandAvg(Third, 2 * Third);
+	const float Treble = BandAvg(2 * Third, NumBands);
+
+	// Smooth the bands. Bass/overall a touch slower, treble fast for sparkle.
+	SmoothedBass = FMath::Lerp(SmoothedBass, Bass, 0.35f);
+	SmoothedMid = FMath::Lerp(SmoothedMid, Mid, 0.4f);
+	SmoothedTreble = FMath::Lerp(SmoothedTreble, Treble, 0.55f);
+	RawAudioAmplitude = FMath::Lerp(RawAudioAmplitude, Overall, 0.4f);
+
+	// Beat detection: bass frame well above its running average → onset.
+	if (Bass > BassRunningAvg * BeatSensitivity && Bass > 0.08f)
+	{
+		BeatEnergy = FMath::Min(1.0f, BeatEnergy + (Bass - BassRunningAvg) * 4.0f);
+	}
+	BassRunningAvg = FMath::Lerp(BassRunningAvg, Bass, 0.08f); // slow envelope
+	BeatEnergy = FMath::Max(0.0f, BeatEnergy - BeatDecayRate * DeltaTime);
 }
 
 // ============================================================================
@@ -551,11 +806,10 @@ float UAuroraDataMixer::ComputeAggregateIntensity() const
 		WeightSum += SourceWeights.UDPWeight;
 	}
 
-	if (bUseAudio)
-	{
-		Total += RawAudioAmplitude * SourceWeights.AudioWeight;
-		WeightSum += SourceWeights.AudioWeight;
-	}
+	// NOTE: Audio is intentionally NOT averaged into the base aggregate. A live
+	// mic is silent between sounds, and averaging silence in would drag the whole
+	// aurora dark. Instead audio is layered on additively as accents (bass→intensity,
+	// beats→flares) in ComputeParameters, so quiet rooms keep the vivid baseline.
 
 	if (bUseRFSpectrum && RawRFBins.Num() > 0)
 	{
@@ -606,6 +860,17 @@ FAuroraParameters UAuroraDataMixer::ComputeParameters(float DeltaTime)
 
 	// Decay substorm energy
 	SubstormEnergy = FMath::Max(0.0f, SubstormEnergy - SubstormDecayRate * DeltaTime);
+
+	// Beats and sharp phone motion inject substorm energy → instant bright flares.
+	// (max, not add, so they ride on top of data-driven substorms cleanly.)
+	if (bAudioAnalysisActive)
+	{
+		SubstormEnergy = FMath::Max(SubstormEnergy, BeatEnergy);
+	}
+	if (bHasPositionData)
+	{
+		SubstormEnergy = FMath::Max(SubstormEnergy, SmoothedMotion * 0.8f);
+	}
 
 	float Smooth = GlobalSmoothingFactor;
 	float PotSmooth = PotSmoothingFactor; // Pots react fast — ~3 frame response at 0.3
@@ -791,6 +1056,35 @@ FAuroraParameters UAuroraDataMixer::ComputeParameters(float DeltaTime)
 	if (bUseRFSpectrum && SmoothedRFBins.Num() > 0)
 	{
 		Params.RFSpectrumBins = SmoothedRFBins;
+	}
+
+	// --- Live audio band outputs + additive accents ---
+	// Accents only touch amplitude-style params (intensity, sway amplitude),
+	// never fold *frequency*, to avoid spatial popping in the ripple.
+	Params.BassPulse = SmoothedBass;
+	Params.MidPulse = SmoothedMid;
+	Params.TreblePulse = SmoothedTreble;
+	Params.BeatFlare = bAudioAnalysisActive ? BeatEnergy : 0.0f;
+	if (bAudioAnalysisActive)
+	{
+		Params.Intensity = FMath::Clamp(Params.Intensity + SmoothedBass * 0.25f, 0.0f, 1.0f);
+		Params.NoisePersistence = FMath::Clamp(Params.NoisePersistence + SmoothedMid * 0.2f, 0.0f, 1.0f);
+		// A little extra audio breathing on top of the existing luminance pulse.
+		Params.LuminancePulse = FMath::Clamp(Params.LuminancePulse + SmoothedBass * 0.4f, 0.0f, 1.0f);
+	}
+
+	// --- Position outputs + additive accents ---
+	Params.FocusX = SmoothedFocusX;
+	Params.FocusEnergy = bHasPositionData ? SmoothedFocusEnergy : 0.0f;
+	Params.MotionEnergy = bHasPositionData ? SmoothedMotion : 0.0f;
+	if (bHasPositionData)
+	{
+		Params.Intensity = FMath::Clamp(Params.Intensity + SmoothedFocusEnergy * 0.25f, 0.0f, 1.0f);
+		Params.VerticalExtent = FMath::Clamp(Params.VerticalExtent + SmoothedFocusEnergy * 0.2f, 0.1f, 1.0f);
+		// WaveSpeed accumulates phase incrementally in the renderer, so changing it
+		// is safe (no discontinuity). Motion adds turbulence via sway amplitude too.
+		Params.WaveSpeed = FMath::Clamp(Params.WaveSpeed + SmoothedMotion * 1.5f, 0.2f, 4.0f);
+		Params.NoisePersistence = FMath::Clamp(Params.NoisePersistence + SmoothedMotion * 0.3f, 0.0f, 1.0f);
 	}
 
 	return Params;

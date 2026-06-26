@@ -10,6 +10,9 @@
 #include "MaestraEntity.h"
 #include "AuroraDataMixer.generated.h"
 
+class UAudioCaptureComponent;
+class USoundSubmix;
+
 // ============================================================================
 // Enums for external signal routing
 // ============================================================================
@@ -139,13 +142,46 @@ struct MAESTRAUNREALCLEAN_API FAuroraParameters
 	UPROPERTY(BlueprintReadOnly, Category = "Aurora")
 	float NoisePersistence = 0.4f;
 
-	// Audio-driven luminance pulse (0-1). Breathing rhythm.
+	// Audio-driven luminance pulse (0-1). Breathing rhythm. Overall amplitude.
 	UPROPERTY(BlueprintReadOnly, Category = "Aurora")
 	float LuminancePulse = 0.0f;
 
-	// Substorm flare intensity (0-1). Triggered by data spikes.
+	// Substorm flare intensity (0-1). Triggered by data spikes, beats, sharp motion.
 	UPROPERTY(BlueprintReadOnly, Category = "Aurora")
 	float SubstormFlare = 0.0f;
+
+	// --- Audio frequency bands (0-1), smoothed ---
+
+	// Low-frequency energy (kick/bass). Drives emissive + intensity.
+	UPROPERTY(BlueprintReadOnly, Category = "Aurora|Audio")
+	float BassPulse = 0.0f;
+
+	// Mid-frequency energy (vocals/instruments). Drives fold ripple.
+	UPROPERTY(BlueprintReadOnly, Category = "Aurora|Audio")
+	float MidPulse = 0.0f;
+
+	// High-frequency energy (cymbals/air). Drives vertical shimmer sparkle.
+	UPROPERTY(BlueprintReadOnly, Category = "Aurora|Audio")
+	float TreblePulse = 0.0f;
+
+	// Instantaneous beat impulse (0-1). Spikes on detected onsets, decays fast.
+	UPROPERTY(BlueprintReadOnly, Category = "Aurora|Audio")
+	float BeatFlare = 0.0f;
+
+	// --- Position-driven (Maestra entity x/y/z, e.g. from a GyrOSC phone) ---
+
+	// Horizontal focus 0-1: the bright "hotspot" position along the curtain width.
+	// Driven by the X axis — tilt/move the phone and the glow slides across the wall.
+	UPROPERTY(BlueprintReadOnly, Category = "Aurora|Position")
+	float FocusX = 0.5f;
+
+	// Focus strength 0-1: how concentrated/bright the hotspot is. Driven by the Y axis.
+	UPROPERTY(BlueprintReadOnly, Category = "Aurora|Position")
+	float FocusEnergy = 0.0f;
+
+	// Motion energy 0-1: magnitude of position change. Shaking the phone erupts the aurora.
+	UPROPERTY(BlueprintReadOnly, Category = "Aurora|Position")
+	float MotionEnergy = 0.0f;
 
 	// Per-bin normalized RF spectrum (0-1), mapped spatially along curtain width.
 	// Empty when RF is disabled. Length matches RFNumBins.
@@ -227,9 +263,91 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aurora|RF", meta=(EditCondition="bUseRFSpectrum"))
 	int32 RFNumBins = 128;
 
-	// Audio (expects an AudioSpectrumActor to broadcast OnSpectrumUpdated)
+	// Audio. When bUseMicrophone is true the mixer captures the default audio
+	// input device and runs real-time spectral analysis itself. When false, you
+	// can still push audio manually via FeedAudioSpectrum (legacy path).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aurora|Audio")
 	bool bUseAudio = false;
+
+	/** Capture the system's default audio input (mic / line-in / interface) and
+	 *  analyze it in real time. Routed to a private submix with NO master output,
+	 *  so there is never any speaker feedback. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aurora|Audio", meta=(EditCondition="bUseAudio"))
+	bool bUseMicrophone = true;
+
+	/** Number of log-spaced analysis bands across the audible range. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aurora|Audio", meta=(EditCondition="bUseMicrophone", ClampMin="8", ClampMax="64"))
+	int32 AudioNumBands = 24;
+
+	/** Lowest analyzed frequency (Hz). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aurora|Audio", meta=(EditCondition="bUseMicrophone"))
+	float AudioMinFrequency = 40.0f;
+
+	/** Highest analyzed frequency (Hz). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aurora|Audio", meta=(EditCondition="bUseMicrophone"))
+	float AudioMaxFrequency = 14000.0f;
+
+	/** Input gain applied to raw magnitudes before normalization. Raise for quiet
+	 *  rooms/mics, lower if the aurora is pinned bright. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aurora|Audio", meta=(EditCondition="bUseMicrophone", ClampMin="0.1", ClampMax="50.0"))
+	float AudioInputGain = 12.0f;
+
+	/** Beat sensitivity: a bass frame this many times above its running average
+	 *  fires a beat flare. Lower = more beats, higher = only strong hits. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aurora|Audio", meta=(EditCondition="bUseMicrophone", ClampMin="1.05", ClampMax="4.0"))
+	float BeatSensitivity = 1.4f;
+
+	/** How fast a beat flare decays back to zero (per second). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aurora|Audio", meta=(EditCondition="bUseMicrophone", ClampMin="0.5", ClampMax="12.0"))
+	float BeatDecayRate = 4.0f;
+
+	/** Optional: assign a SoundSubmix asset to analyze (recommended — most reliable,
+	 *  and you can set its Output Volume to 0 so the mic is never monitored through
+	 *  speakers). If left empty, one is created at runtime as a fallback. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aurora|Audio", meta=(EditCondition="bUseMicrophone"))
+	USoundSubmix* AudioAnalysisSubmix = nullptr;
+
+	// === Position (Maestra entity x/y/z — e.g. a phone running GyrOSC routed
+	//     through Maestra's OSC mapper into entity state) ===
+
+	/** Enable reading x/y/z from a Maestra entity and driving the aurora's focus
+	 *  hotspot and motion energy from it. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aurora|Position")
+	bool bUsePosition = false;
+
+	/** Entity slug to read position from. Leave empty to reuse MaestraEntitySlug. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aurora|Position", meta=(EditCondition="bUsePosition"))
+	FString PositionEntitySlug;
+
+	/** State key for the X axis (default "x"). Match your OSC mapper output. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aurora|Position", meta=(EditCondition="bUsePosition"))
+	FString PosXKey = TEXT("x");
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aurora|Position", meta=(EditCondition="bUsePosition"))
+	FString PosYKey = TEXT("y");
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aurora|Position", meta=(EditCondition="bUsePosition"))
+	FString PosZKey = TEXT("z");
+
+	/** Raw input range for each axis (the values your sender emits). Remapped to
+	 *  0-1 internally. GyrOSC accel/attitude is typically about -1..1. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aurora|Position", meta=(EditCondition="bUsePosition"))
+	float PosInputMin = -1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aurora|Position", meta=(EditCondition="bUsePosition"))
+	float PosInputMax = 1.0f;
+
+	/** Smoothing for position (higher = snappier, lower = floatier). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aurora|Position", meta=(EditCondition="bUsePosition", ClampMin="0.02", ClampMax="1.0"))
+	float PositionSmoothing = 0.2f;
+
+	/** Multiplier on detected motion (rate of change of x/y/z). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aurora|Position", meta=(EditCondition="bUsePosition", ClampMin="0.1", ClampMax="20.0"))
+	float MotionSensitivity = 6.0f;
+
+	/** Set true once at least one position value has been received. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Aurora|Position")
+	bool bHasPositionData = false;
 
 	// === Potentiometers (4 knobs, 0-1, received via UDP JSON) ===
 
@@ -313,6 +431,33 @@ private:
 	TArray<float> RawRFBins;
 	TArray<float> SmoothedRFBins;
 
+	// --- Audio analysis (mic) state ---
+	UPROPERTY()
+	UAudioCaptureComponent* AudioCapture;
+
+	UPROPERTY()
+	USoundSubmix* AnalysisSubmix;
+
+	bool bAudioAnalysisActive = false;
+	TArray<float> AnalysisFrequencies;   // frequencies queried each frame
+	float SmoothedBass = 0.0f;
+	float SmoothedMid = 0.0f;
+	float SmoothedTreble = 0.0f;
+	float BassRunningAvg = 0.0f;          // for beat detection
+	float BeatEnergy = 0.0f;              // current beat flare (decays)
+
+	// --- Position state ---
+	UPROPERTY()
+	UMaestraEntity* PositionEntity;
+
+	float SmoothedFocusX = 0.5f;
+	float SmoothedFocusEnergy = 0.0f;
+	float SmoothedMotion = 0.0f;
+	float PrevPosX = 0.0f;
+	float PrevPosY = 0.0f;
+	float PrevPosZ = 0.0f;
+	bool bHasPrevPos = false;
+
 	// --- Potentiometer raw targets ---
 	float RawPot1 = 0.35f;
 	float RawPot2 = 0.5f;
@@ -372,9 +517,13 @@ private:
 	void InitializeUDP();
 	void InitializeRF();
 	void InitializeExternalBindings();
+	void InitializeAudioAnalysis();
+	void InitializePosition();
 
 	void ReadMaestraData();
 	void ReadRFData(float DeltaTime);
+	void ReadAudioAnalysis(float DeltaTime);
+	void ReadPositionData(float DeltaTime);
 	void ReadExternalBindings(float DeltaTime);
 	void ApplyExternalBindings(FAuroraParameters& Params) const;
 

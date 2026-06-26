@@ -188,6 +188,27 @@ public:
 	float MaxEmissive = 8.0f;
 
 	// =======================================================================
+	// Live Reactivity (audio bands + phone position)
+	// =======================================================================
+
+	/** How much extra emissive the low-frequency (bass/kick) energy adds. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aurora|Reactivity", meta=(ClampMin="0.0", ClampMax="12.0"))
+	float BassEmissiveStrength = 3.5f;
+
+	/** How strongly high-frequency (treble) energy sparkles the vertical shimmer. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aurora|Reactivity", meta=(ClampMin="0.0", ClampMax="3.0"))
+	float TrebleShimmerStrength = 0.9f;
+
+	/** Peak brightness multiplier of the position "hotspot" that tracks FocusX.
+	 *  0 disables the moving hotspot entirely. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aurora|Reactivity", meta=(ClampMin="0.0", ClampMax="4.0"))
+	float HotspotStrength = 1.8f;
+
+	/** Width of the hotspot along the curtain (fraction of span, 0-1). Smaller = tighter spotlight. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aurora|Reactivity", meta=(ClampMin="0.02", ClampMax="0.5"))
+	float HotspotWidth = 0.13f;
+
+	// =======================================================================
 	// Atmospheric Glow
 	// =======================================================================
 
